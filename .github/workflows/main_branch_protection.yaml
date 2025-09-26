@@ -1,9 +1,13 @@
 name: Main Branch Protection
 
 on:
+  push:
+    branches:
+      - main
   pull_request:
     branches:
       - main
+
 
 jobs:
   check-branch:
