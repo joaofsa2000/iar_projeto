@@ -1,0 +1,27 @@
+Index: main.py
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+>print(\"teste\")
+===================================================================
+diff --git a/main.py b/main.py
+--- a/main.py	(revision 71478150081b970dbd21e6a807ae2d0a839b2f53)
++++ b/main.py	(date 1759437824681)
+@@ -1,1 +1,16 @@
+-print("teste")
+\ No newline at end of file
++import os
++import traci
++
++sumo_home = r"C:\Program Files (x86)\Eclipse\Sumo"
++cfg_file = r"C:\Program Files (x86)\Eclipse\Sumo\doc\tutorial\traci_pedestrian_crossing\data\run.sumocfg"
++
++sumo_binary = os.path.join(sumo_home, "bin", "sumo-gui.exe")
++
++traci.start([sumo_binary, "-c", cfg_file])
++print("Simulação iniciada com sucesso!")
++
++for step in range(200):
++    traci.simulationStep()
++    print("Step:", step)
++
++traci.close()
