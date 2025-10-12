@@ -5,8 +5,7 @@ import uuid
 import pygame
 
 from spade.agent import Agent
-from spade.behaviour import CyclicBehaviour
-from spade.behaviour import OneShotBehaviour
+from spade.behaviour import CyclicBehaviour, OneShotBehaviour
 from spade.message import Message
 
 from Models.LightStatus import LightStatus
@@ -19,11 +18,11 @@ class EmergencyCarAgent(Agent):
         self.id = jid
         self.password = password
 
-        self.guid = uuid.uuid4()
+        self.guid = uuid.uuid4()  # Identificador único do veículo
 
         self.car_at_traffic_light = False
 
-        # Adiciona o veiculo ao ambiente
+        # Adiciona o veículo de emergência ao ambiente
         self.car_obj = self.environment.add_emergency_car(self.id)
 
     async def setup(self):
@@ -32,59 +31,55 @@ class EmergencyCarAgent(Agent):
                 super().__init__()
                 self.agent = agent
 
-                # Guarda as variáveis do agente no behaviour
+                # Guarda referências às variáveis do agente
                 self.id = self.agent.id
                 self.car = self.agent.car_obj
                 self.env = self.agent.environment
-                self.is_msg_sent = False
+                self.is_msg_sent = False  # Indica se já enviou mensagem ao semáforo
 
             async def run(self):
-                # Veiculo de emergencia termina quando sai do mapa (is_car_done)
+                # Verifica se o veículo já saiu do mapa
                 if self.car.sprites()[0].is_car_done():
                     print("EMERGENCY DONE")
                     self.kill()
 
                 await self.move()
 
-                # Atualiza o objeto no mapa
+                # Atualiza o estado do carro no mapa
                 self.car.sprites()[0].update()
 
             async def move(self):
-                # Verifica se o veiculo está num semáforo
+                # Verifica colisão com semáforo
                 is_tl_collided, tl_id = self.env.collision_traffic_light(self.car.sprites()[0])
 
-                # Caso esteja no semáforo valida o seu estado
                 if is_tl_collided and self.env.get_traffic_light_status(tl_id) == LightStatus.RED:
-                    # Caso esteja vermelho para o veiculo
+                    # Semáforo vermelho: para o veículo
                     self.car.sprites()[0].stop_car()
 
-                    current_awaiting_time = 0
-                    if self.agent.guid in self.env.emergency_cars_awaiting_time:
-                        current_awaiting_time = self.env.emergency_cars_awaiting_time[self.agent.guid]
+                    # Incrementa contador de tempo de espera
+                    current_wait_time = self.env.emergency_cars_awaiting_time.get(self.agent.guid, 0)
+                    self.env.emergency_cars_awaiting_time[self.agent.guid] = current_wait_time + 1
 
-                    self.env.emergency_cars_awaiting_time[self.agent.guid] = current_awaiting_time + 1
-
-                    # Envia um pedido ao Semáforo para ficar verde
+                    # Envia pedido ao semáforo para alterar estado para verde
                     if not self.is_msg_sent:
                         msg_behav = SendMsgBehav(self.env.get_traffic_light_jid_by_id(tl_id), tl_id)
                         self.agent.add_behaviour(msg_behav)
                         self.is_msg_sent = True
 
-                    # No caso do semáforo não conseguir mudar o seu estado por causa do acidente, ao fim de algum tempo o veiculo vai tomar nova direção
-                    if self.env.emergency_cars_awaiting_time[self.agent.guid] > 150 and not self.car.sprites()[
-                        0].is_car_changing_direction():
+                    # Se semáforo não mudar, após tempo limite altera direção do veículo
+                    if self.env.emergency_cars_awaiting_time[self.agent.guid] > 150 and not self.car.sprites()[0].is_car_changing_direction():
                         self.car.sprites()[0].activate_changing_direction()
                         self.car.sprites()[0].change_direction(str(tl_id).split("_")[3])
                         self.is_msg_sent = False
                         self.env.emergency_cars_awaiting_time[self.agent.guid] = 0
                 else:
+                    # Semáforo verde: continua e reseta variáveis
                     self.env.emergency_cars_awaiting_time[self.agent.guid] = 0
-
-                    # Estando o semáforo verde avança
                     self.car.sprites()[0].disable_changing_direction()
                     self.car.stopped_at_tl_id = False
                     self.is_msg_sent = False
 
+                    # Verifica colisão com sprites e define viragem
                     if self.env.collision_sprite(self.car.sprites()[0]):
                         self.car.sprites()[0].fires_car()
                         self.car.sprites()[0].activate_turning()
@@ -102,7 +97,7 @@ class EmergencyCarAgent(Agent):
                 self.tl_jid = tl_jid
                 self.tl_id = tl_id
 
-            # Envia mensagem para o agente Semáforo no qual o veiculo está parado a pedir que altere o seu estado para verde
+            # Envia mensagem ao semáforo pedindo alteração para verde
             async def run(self):
                 print("EMERGENCY REQUESTING GREEN LIGHT")
                 msg = Message(to=self.tl_jid)

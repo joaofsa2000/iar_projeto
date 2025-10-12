@@ -28,7 +28,7 @@ class Environment:
         self.clock = pygame.time.Clock()
 
         #Array com os dias da semana e horas do dia
-        self.DAYS_OF_WEEK = ['SUNDAY', 'MONDAY', 'TUESDAY', 'WEDNESDAY', 'THURSDAY', 'FRIDAY', 'SATURDAY']
+        self.DAYS_OF_WEEK = ['Domingo', 'Segunda', 'Terça', 'Quarta', 'Quinta', 'Sexta', 'Sabado']
         self.TIMES_OF_DAY = ['00', '01', '02', '03', '04', '05', '06', '07', '08', '09', '10', '11', '12',
                              '13', '14', '15', '16', '17', '18', '19', '20', '21', '22', '23']
 
@@ -82,7 +82,7 @@ class Environment:
 
     #Guarda registo em fx CSV
     def write_on_csv(self, data):
-        file_name = "waiting_cars_records_times.csv"
+        file_name = "espera_carros_lista.csv"
 
         with open(file_name, 'a', newline='') as csv_file:
             csv_writer = csv.writer(csv_file)
