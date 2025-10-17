@@ -31,36 +31,33 @@ class EmergencyCarAgent(Agent):
                 super().__init__()
                 self.agent = agent
 
-                # Guarda referências às variáveis do agente
+                # Guarda referências
                 self.id = self.agent.id
                 self.car = self.agent.car_obj
                 self.env = self.agent.environment
-                self.is_msg_sent = False  # Indica se já enviou mensagem ao semáforo
+                self.is_msg_sent = False
 
             async def run(self):
-                # Verifica se o veículo já saiu do mapa
+                # Verifica se o veículo
                 if self.car.sprites()[0].is_car_done():
                     print("EMERGENCY DONE")
                     self.kill()
 
                 await self.move()
 
-                # Atualiza o estado do carro no mapa
                 self.car.sprites()[0].update()
 
             async def move(self):
-                # Verifica colisão com semáforo
                 is_tl_collided, tl_id = self.env.collision_traffic_light(self.car.sprites()[0])
 
                 if is_tl_collided and self.env.get_traffic_light_status(tl_id) == LightStatus.RED:
-                    # Semáforo vermelho: para o veículo
+                    # Semáforo vermelho: veículo
                     self.car.sprites()[0].stop_car()
 
-                    # Incrementa contador de tempo de espera
                     current_wait_time = self.env.emergency_cars_awaiting_time.get(self.agent.guid, 0)
                     self.env.emergency_cars_awaiting_time[self.agent.guid] = current_wait_time + 1
 
-                    # Envia pedido ao semáforo para alterar estado para verde
+                    # semáforo para verde
                     if not self.is_msg_sent:
                         msg_behav = SendMsgBehav(self.env.get_traffic_light_jid_by_id(tl_id), tl_id)
                         self.agent.add_behaviour(msg_behav)

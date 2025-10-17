@@ -1,4 +1,3 @@
-
 import csv
 import random
 import pygame
@@ -22,65 +21,48 @@ CRASH_POSITIONS = {
 
 class Environment:
     def __init__(self):
-        #Define o ecrã do ambiente
+        # estabelece janela de visualização e recursos gráficos base
         self.screen = pygame.display.set_mode((1280, 720))
         self.bg_surf = pygame.image.load('Map/Resources/fundo.png').convert()
         self.clock = pygame.time.Clock()
 
-        #Array com os dias da semana e horas do dia
-        self.DAYS_OF_WEEK = ['Domingo', 'Segunda', 'Terça', 'Quarta', 'Quinta', 'Sexta', 'Sabado']
-        self.TIMES_OF_DAY = ['00', '01', '02', '03', '04', '05', '06', '07', '08', '09', '10', '11', '12',
-                             '13', '14', '15', '16', '17', '18', '19', '20', '21', '22', '23']
-
-        #Definição das interseções/cruzamentos
+        # cria conjunto de cruzamentos no mapa
         self.intersections = pygame.sprite.Group()
-        self.intersections.add(Intersection(193, 450))  # bottom_left_intersection
-        self.intersections.add(Intersection(552, 450))  # bottom_mid_intersection
-        self.intersections.add(Intersection(917, 450))  # bottom_right_intersection
-        self.intersections.add(Intersection(193, 100))  # top_left_intersection
-        self.intersections.add(Intersection(552, 100))  # top_mid_intersection
-        self.intersections.add(Intersection(917, 100))  # top_right_intersection
+        self.intersections.add(Intersection(193, 450))  # cruzamento inferior esquerdo
+        self.intersections.add(Intersection(552, 450))  # cruzamento inferior central
+        self.intersections.add(Intersection(917, 450))  # cruzamento inferior direito
+        self.intersections.add(Intersection(193, 100))  # cruzamento superior esquerdo
+        self.intersections.add(Intersection(552, 100))  # cruzamento superior central
+        self.intersections.add(Intersection(917, 100))  # cruzamento superior direito
 
-        #Randomiza uma hora e um dia para a simulação
-        self.day_of_week = random.choice(self.DAYS_OF_WEEK)
-        self.time_of_day = random.choice(self.TIMES_OF_DAY)
-
-        #Array com todos os carros e carros de emergencia do ambiente
+        # estruturas de dados para gestão de veículos
         self.cars = []
         self.emergency_cars = []
         self.emergency_cars_awaiting_time = {}
+        self.car_positions = {}
+        self.cars_stopped_at_tl = {}
 
-        #Array com todos os semáforos do ambiente
+        # estruturas de dados para gestão de semáforos
         self.traffic_lights = pygame.sprite.Group()
         self.traffic_lights_objects = {}
         self.traffic_lights_agents_tl = {}
-
-        #Array com as posições dos carros
-        self.car_positions = {}
-
-        #Array com os estados dos semáforos
         self.traffic_lights_status = {}
 
-        # Carros parados nos semaforos
-        self.cars_stopped_at_tl = {}
-
-        # Tempos de expera para registar num ficheiro excel
         self.cars_stopped_times = []
 
-        #Flag de acidente no mapa e localização da mesma caso exista
+
         self.map_crash = False
         self.crash_position = (0, 0)
         self.crash_location = ""
 
-    #Valida se existe colisão de um carro com um cruzamento
-    #Se sim, retorna True, se não retorno False
     def collision_sprite(self, sprite):
         if pygame.sprite.spritecollide(sprite, self.intersections, False):
             return True
         else:
             return False
 
-    #Guarda registo em fx CSV
+
+    # persiste dados de espera em ficheiro CSV para análise posterior
     def write_on_csv(self, data):
         file_name = "espera_carros_lista.csv"
 
@@ -90,7 +72,7 @@ class Environment:
 
         print('Records saved on file with name: ' + file_name)
 
-    #Verifica se um determinado carro está num semáforo
+    # deteta colisão entre veículo e zona de semáforo
     def collision_traffic_light(self, sprite):
         coll = pygame.sprite.spritecollide(sprite, self.traffic_lights, False)
         if coll:
@@ -98,7 +80,7 @@ class Environment:
         else:
             return (False, 0)
 
-    #Atualiza o mapa pygame
+    # processa ciclo de renderização da simulação
     def update_map(self):
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
@@ -113,34 +95,22 @@ class Environment:
         if self.map_crash:
             self.collisions.draw(self.screen)
 
-        #Desenha todos os semáforos no mapa
+        # renderiza todos os semáforos ativos
         for tl in self.traffic_lights:
             tl.draw()
 
-        #Desenha todos os carros no mapa
+        # renderiza veículos comuns
         for car in self.cars:
             car.sprites()[0].draw()
 
-        #Desenha todos os veiculos de emergencia no mapa
+        # renderiza veículos de emergência
         for emergency_car in self.emergency_cars:
             emergency_car.sprites()[0].draw()
-
-        #Apresenta no canto da janela a hora e o dia da simulação
-        pygame.font.init()
-        padding = 20
-        font_size = 14
-        font = pygame.font.SysFont('Sans', font_size, bold=True)
-        clock = font.render(str(self.day_of_week) + ', ' + str(self.time_of_day) + ':00', True, (255, 255, 255))
-        clock_surf = pygame.Surface((clock.get_size()[0] + padding, clock.get_size()[1] + padding))
-        clock_surf.fill((0, 0, 0))
-        clock_surf.blit(clock, (padding / 2, padding / 2))
-        self.screen.blit(clock_surf, (0, 720 - font_size - padding))
 
         pygame.display.update()
         self.clock.tick(60)
 
-    #Adiciona um novo carro ao ambiente
-    #Retorna o objecto criado de volta para o agente, para que possam ser feitas alterações no seu estado
+
     def add_car(self, car_id):
         car = pygame.sprite.GroupSingle()
         car.add(Car(self.screen, str(car_id).replace("car_", "").replace("@localhost", "")))
@@ -150,7 +120,6 @@ class Environment:
 
         return car
 
-    #Obtem um carro pelo seu ID
     def get_car_by_id(self, car_id):
         for car_group in self.cars:
             if car_group.sprites() and car_group.sprites()[0].id:
@@ -159,17 +128,15 @@ class Environment:
                     return car_group
         return None
 
-    #Atualiza a posição de um carro
+    # atualiza coordenadas e orientação de veículo específico
     def update_car_position(self, car_id, car_pos):
         self.car_positions[car_id] = (car_pos[0], car_pos[1], car_pos[2])
         #print(car_id, self.car_positions[car_id])
 
-    #Devolve o array com as posições de todos os carros:
+    # retorna dicionário com localização de todos os veículos
     def get_car_positions(self):
         return self.car_positions
 
-    #Adiciona um novo semáforo ao ambiente
-    #Retorna o objecto criado de volta para o agente, para que possam ser feitas alterações no seu estado
     def add_traffic_light(self, tl_jid, tl_id, tl_pos, angle):
         tl = TrafficLight(self.screen, tl_id, tl_pos, angle)
         self.traffic_lights.add(tl)
@@ -180,20 +147,20 @@ class Environment:
 
         return tl
 
-    #Atualiza o estado do semáforo
+    # modifica fase luminosa de semáforo específico
     def update_traffic_light_status(self, tl_id, status):
         self.traffic_lights_status[tl_id] = status
 
-    #Retorna o estado do semáforo pelo ID
+    # consulta estado atual de semáforo por identificador
     def get_traffic_light_status(self, tl_id):
         return self.traffic_lights_status[str(tl_id)]
 
-    #Retorna o JID do agente pelo id do semáforo
+    # obtém identificador do agente responsável por semáforo
     def get_traffic_light_jid_by_id(self, tl_id):
         return self.traffic_lights_agents_tl[str(tl_id)]
 
-    #Adiciona um novo carro de emergencia ao ambiente
-    #Retorna o objecto criado de volta para o agente, para que possam ser feitas alterações no seu estado
+    # instancia novo veículo de emergência no ambiente
+    # devolve referência para controlo pelo agente correspondente
     def add_emergency_car(self, car_id):
         car = pygame.sprite.GroupSingle()
         car.add(EmergencyCar(self.screen, str(car_id).replace("car_", "").replace("@localhost", "")))
@@ -203,7 +170,7 @@ class Environment:
 
         return car
 
-    #Ativa a flag de acidente no mapa
+    # ativa condição de bloqueio por acidente em cruzamento
     def activate_map_crash(self, crossing):
         self.map_crash = True
         self.crash_position = random.choice(CRASH_POSITIONS[crossing])
@@ -213,11 +180,11 @@ class Environment:
         self.collisions = pygame.sprite.Group()
         self.collisions.add(Crash(self.crash_position[1]))
 
-    #Desativa a flag de acidente no mapa
+    # remove condição de bloqueio por acidente
     def deactivate_map_crash(self):
         self.map_crash = False
 
-    #Dada posição do acidente e do carro no cruzamento, retorna a direção bloqueada que o carro não pode seguir
+    # calcula faixa bloqueada baseada em posição relativa do acidente
     def determine_restricted_turn(self, crash_position, car_position):
         restrictions = {
             ('r', 't'): "l",
@@ -236,7 +203,7 @@ class Environment:
 
         return restrictions.get((crash_position, car_position), "")
 
-    #Dada um acidente e um carro, retorna se o carro possui alguma restrição no seu percurso
+    # verifica se veículo enfrenta restrição de trajetória devido a acidente
     def get_blocked_turn(self, tl, crash):
         tl_to_open_txt_arr = str(tl).split("_")
         crash_location_txt_arr = str(crash).split("_")

@@ -15,11 +15,10 @@ class CarAgent(Agent):
     def __init__(self, jid, password, environment):
         super().__init__(jid, password)
         self.environment = environment
+
         self.id = jid
 
         self.car_at_traffic_light = False
-
-        # Insere o carro no ambiente e guarda o objeto retornado
         self.car_obj = self.environment.add_car(self.id)
 
     async def setup(self):
@@ -28,7 +27,7 @@ class CarAgent(Agent):
                 super().__init__()
                 self.agent = agent
 
-                # Guarda referências às variáveis do agente no behaviour
+                # Guarda referências
                 self.id = self.agent.id
                 self.car = self.agent.car_obj
                 self.env = self.agent.environment
@@ -48,10 +47,10 @@ class CarAgent(Agent):
                 self.car.sprites()[0].update()
 
             async def move(self):
-                # Verifica se o carro colidiu com um semáforo
+                # Verifica se o carro colidiu
                 is_tl_collided, tl_id = self.env.collision_traffic_light(self.car.sprites()[0])
 
-                # Se estiver num semáforo vermelho, mantém o carro parado
+                #semáforo vermelho -> carro parado
                 if is_tl_collided and self.env.get_traffic_light_status(tl_id) == LightStatus.RED:
                     self.car.sprites()[0].stop_car()
                     self.car.stopped_at_tl_id = tl_id
@@ -59,7 +58,6 @@ class CarAgent(Agent):
                     self.car.stopped_at_tl_start_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     await self.set_cars_at_traffic_light(tl_id)
                 else:
-                    # Verifica colisões com sprites para definir a viragem
                     if self.env.collision_sprite(self.car.sprites()[0]):
                         self.car.sprites()[0].fires_car()
                         self.car.sprites()[0].activate_turning()
@@ -68,7 +66,7 @@ class CarAgent(Agent):
                         self.car.sprites()[0].flag_car_is_turning(False)
                         self.car.sprites()[0].fires_car()
 
-                    # Termina contagem do tempo de espera no semáforo
+                    # Termina espera no semáforo
                     if hasattr(self.car, 'stopped_at_tl_start_time') and self.car.stopped_at_tl_start_time:
                         await self.set_cars_stopped_times()
 
@@ -81,7 +79,7 @@ class CarAgent(Agent):
                     self.env.cars_stopped_times.append((self.car.stopped_at_tl_id, self.car.sprites()[0].id, difference))
                 self.car.stopped_at_tl_start_time = False
 
-            # Calcula a diferença de tempo entre início e fim da espera
+            # Calcula a diferença de tempo entre início e fim
             def calc_time_difference(self, start_time, end_time):
                 time_format = "%Y-%m-%d %H:%M:%S"
                 start = datetime.strptime(start_time, time_format)

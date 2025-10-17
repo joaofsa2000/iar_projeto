@@ -1,12 +1,15 @@
 import time
 from enum import Enum
 
-# Modelos de luz
+# Enumeração dos estados luminosos
 from enum import Enum
 
 class LightStatus(Enum):
+    # sinal de paragem obrigatória
     RED = 1
+    # fase de transição antes de vermelho
     YELLOW = 2
+    # autorização de passagem
     GREEN = 3
 
 
@@ -19,26 +22,26 @@ class TrafficLight:
 
     def change_status(self, status):
         if status == LightStatus.RED:
-            # lógica para vermelho
+            # configura sinal para paragem
             self.status = LightStatus.RED
         elif status == LightStatus.YELLOW:
-            # lógica para amarelo
+            # configura sinal para precaução
             self.status = LightStatus.YELLOW
         elif status == LightStatus.GREEN:
-            # lógica para verde
+            # configura sinal para passagem livre
             self.status = LightStatus.GREEN
 
     def can_vehicle_pass(self, is_emergency=False):
-        """Veículos de emergência podem passar sempre"""
+        """Veículos prioritários têm passagem garantida independentemente do sinal"""
         if is_emergency:
             return True
         return self.status == LightStatus.GREEN
 
-# Exemplo de simulação
+# Rotina de teste da lógica do semáforo
 if __name__ == "__main__":
     traffic_light = TrafficLight(red_duration=3, green_duration=3)
 
-    for t in range(12):  # Simula 12 ciclos de tempo
+    for t in range(12):  # Executa 12 iterações temporais
         traffic_light.update()
         print(f"Tempo {t}: Luz {traffic_light.status.name}")
         print("Veículo normal pode passar?", traffic_light.can_vehicle_pass(False))

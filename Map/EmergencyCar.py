@@ -4,15 +4,15 @@ import time
 import pygame
 from Models.Directions import Directions
 
-AMBULANCE = ['Map/Resources/Cars/ambulance_1.png', 'Map/Resources/Cars/ambulance_2.png']
-POLICE = ['Map/Resources/Cars/police_1.png', 'Map/Resources/Cars/police_2.png']
+AMBULANCE = ['Map/Resources/Cars/ambulancia-1.png', 'Map/Resources/Cars/ambulancia-2.png']
+POLICE = ['Map/Resources/Cars/policia-1.png', 'Map/Resources/Cars/policia-2.png']
 
 directions_options = [Directions.RIGHT, Directions.LEFT, Directions.FORWARD]
 spawning_points = [
-    ((310, 780), 0), ((669, 780), 0), ((1034, 780), 0),  # bottom roads
-    ((244, -50), 180), ((603, -50), 180), ((969, -50), 180),  # top roads
-    ((-50, 201), -90), ((-50, 552), -90),  # left roads
-    ((1340, 135), 90), ((1340, 486), 90)  # right roads
+    ((310, 780), 0), ((669, 780), 0), ((1034, 780), 0),  # faixas inferiores
+    ((244, -50), 180), ((603, -50), 180), ((969, -50), 180),  # faixas superiores
+    ((-50, 201), -90), ((-50, 552), -90),  # faixas esquerdas
+    ((1340, 135), 90), ((1340, 486), 90)  # faixas direitas
 ]
 
 
@@ -24,7 +24,7 @@ class EmergencyCar(pygame.sprite.Sprite):
         self.animation_count = 1
         self.car_type = random.choice([POLICE, AMBULANCE])
 
-        # Inicializa todas as variáveis do objeto
+        # configura os parâmetros iniciais da instância
         self.id = id
         self.contador = 0
         spawning_point = random.choice(spawning_points)
@@ -46,30 +46,30 @@ class EmergencyCar(pygame.sprite.Sprite):
         self.turning_ticks = 0
         self.turning_rotation_done = 0
 
-        # Desenha o veiculo no mapa
+        # carrega a textura inicial do veículo de emergência
         self.image = pygame.image.load(self.car_type[self.get_next_animation_index()]).convert_alpha()
         self.rect = self.image.get_rect(midtop=spawning_point[0])
         self.fires_car()
 
-        # Randomiza a imagem do carro que vai ser usada e desenha no mapa
+        # inicializa mudança de faixa para preparar primeira decisão
         self.activate_switching_lane()
 
         self.stopped_at_tl_id = False
 
-    # Sinaliza que o carro está num semáforo
+    # atualiza o indicador de presença em zona de semáforo
     def set_car_at_tl(self, flag=True):
         self.car_at_traffic_light = flag
 
-    # Retorna a posição atual do carro no mapa
+    # obtém as coordenadas e orientação atual do veículo
     def get_car_position(self):
         return (self.rect.centerx, self.rect.centery, self.angle)
 
-    # Ativa a flag de mudança de faixa quando a viragem do carro terminar
+    # dispara mudança de carril ao concluir manobra de curva
     def flag_car_is_turning(self, flag):
         if self.car_is_turning and not flag: self.activate_switching_lane()
         self.car_is_turning = flag
 
-    # Quando o carro sair do mapa retorna True para que seja removido do mapa
+    # verifica se o veículo saiu dos limites do mapa
     def is_car_done(self):
         if self.rect.x < -160: return True
         if self.rect.x > 1500: return True
@@ -78,17 +78,17 @@ class EmergencyCar(pygame.sprite.Sprite):
 
         return False
 
-    # Ativa o carro, dando velocidade ao mesmo
+    # atribui velocidade ao veículo e marca como ativo
     def fires_car(self, speed=2):
         self.is_car_stopped = False
         self.car_speed = speed
 
-    # Para o carro, tirando a sua velocidade
+    # anula a velocidade e marca veículo como parado
     def stop_car(self):
         self.is_car_stopped = True
         self.car_speed = 0
 
-    # Move o carro em frente, tendo em conta o seu angulo
+    # desloca o veículo segundo a direção angular atual
     def go_forward(self):
         if self.angle > 360: self.angle = 0 + self.angle - 360
         if self.angle < -360: self.angle = 0 + self.angle + 360
@@ -100,7 +100,7 @@ class EmergencyCar(pygame.sprite.Sprite):
         self.rect.x -= horizontal
         self.rect.y -= vertical
 
-    # Calcula a próxima coordenada do carro, tendo em conta o angulo em que este se encontra
+    # determina futura posição baseada em velocidade e orientação
     def get_next_position(self):
         radians = math.radians(self.angle)
         vertical = math.cos(radians) * self.car_speed
@@ -108,31 +108,31 @@ class EmergencyCar(pygame.sprite.Sprite):
 
         return ((self.rect.x - horizontal), (self.rect.y - vertical))
 
-    # Ativa a flag de viragem
+    # começa processo de conversão na interseção
     def activate_turning(self):
         if not self.car_is_turning:
             self.is_turning = (True, self.next_turn_direction)
             self.car_is_turning = True
             self.fires_car()
 
-    # Desativa a flag de viragem
+    # encerra estado de rotação ativa
     def ending_turning(self):
         self.is_turning = (False, '')
         self.fires_car()
 
-    # Ativa a flag de troca de faixa e randomiza a próxima direção que o carro vai tomar
+    # inicia transição entre faixas e define próxima trajetória
     def activate_switching_lane(self):
         self.fires_car()
         self.next_turn_direction = random.choice(directions_options)
 
         self.is_switching_lane = (True, self.next_turn_direction)
 
-    # Desativa a flag de troca de faixa
+    # completa mudança de carril
     def end_switching_lane(self):
         self.is_switching_lane = (False, '')
         self.fires_car()
 
-    # Trata da viragem do carro, chamando o método reponsável por virar o carro para a direção pretendida
+    # coordena lógica de execução das curvas
     def handle_turning(self):
         if self.is_turning[1] == Directions.FORWARD:
             self.ending_turning()
@@ -149,7 +149,7 @@ class EmergencyCar(pygame.sprite.Sprite):
             return
 
     def turn_left(self):
-        # Deixa o carro avançar um pouco dentro do cruzamento e só depois começa a virar
+        # avança parcialmente no cruzamento antes de iniciar rotação
         if self.turning_ticks < 58:
             self.go_forward()
             return
@@ -158,7 +158,7 @@ class EmergencyCar(pygame.sprite.Sprite):
             self.stop_car()
             return
 
-        # Para uma viragem fluida no mapa, o carro faz uma rotação de 90 graus, sendo que a cada update do mapa faz uma rotação de 6 graus
+        # efetua rotação progressiva de 90° em passos de 6° por atualização
         if self.turning_rotation_done < 90:
             self.angle += 6
             self.turning_rotation_done += 6
@@ -169,7 +169,7 @@ class EmergencyCar(pygame.sprite.Sprite):
 
             self.draw()
 
-        # Após ser feita toda a rotação, o carro desativa a flag de viragem e segue em frente
+        # finaliza manobra e retoma deslocamento linear
         if self.turning_rotation_done >= 90:
             self.ending_turning()
             self.fires_car()
@@ -179,7 +179,7 @@ class EmergencyCar(pygame.sprite.Sprite):
             self.turning_ticks = 0
 
     def turn_right(self):
-        # Deixa o carro avançar um pouco dentro do cruzamento e só depois começa a virar
+        # permite entrada controlada na interseção antes de curvar
         if self.turning_ticks < 25:
             self.go_forward()
             return
@@ -188,7 +188,7 @@ class EmergencyCar(pygame.sprite.Sprite):
             self.stop_car()
             return
 
-        # Para uma viragem fluida no mapa, o carro faz uma rotação de 90 graus, sendo que a cada update do mapa faz uma rotação de 6 graus
+        # aplica rotação gradual de 90° através de incrementos de 6°
         if self.turning_rotation_done < 90:
             self.angle -= 6
             self.turning_rotation_done += 6
@@ -199,7 +199,7 @@ class EmergencyCar(pygame.sprite.Sprite):
 
             self.draw()
 
-        # Após ser feita toda a rotação, o carro desativa a flag de viragem e segue em frente
+        # conclui viragem e prossegue em linha reta
         if self.turning_rotation_done >= 90:
             self.ending_turning()
             self.fires_car()
@@ -208,16 +208,16 @@ class EmergencyCar(pygame.sprite.Sprite):
             self.turning_rotation_done = 0
             self.turning_ticks = 0
 
-    # Muda o carro de faixa
+    # executa reposicionamento lateral na via
     def switch_lane(self, direction):
-        # Caso o carro queira seguir em frente, não precisa de mudar de faixa
+        # mantém curso reto quando não há necessidade de ajuste lateral
         if direction == Directions.FORWARD:
             self.fires_car()
             self.go_forward()
             self.end_switching_lane()
             return
 
-        # Para uma viragem fluida no mapa, o carro faz uma rotação de 65 graus, sendo que a cada update do mapa faz uma rotação de 5 graus
+        # realiza ajuste angular de 65° para transição de faixa
         if self.turning_rotation_done < 65:
             self.angle = self.angle + 5 if direction == Directions.LEFT else self.angle - 5
             self.turning_rotation_done += 5
@@ -228,7 +228,7 @@ class EmergencyCar(pygame.sprite.Sprite):
 
             self.draw()
 
-        # Após ser feita toda a rotação, o carro desativa a flag de mudança de faixa e segue em frente
+        # restaura orientação original após reposicionamento
         if self.turning_rotation_done >= 65:
             self.angle = self.angle - self.turning_rotation_done if direction == Directions.LEFT else self.angle + self.turning_rotation_done
             self.draw()
@@ -239,7 +239,7 @@ class EmergencyCar(pygame.sprite.Sprite):
 
             self.turning_rotation_done = 0
 
-    # Desenha o carro no ecrã
+    # renderiza sprite com rotação e frame de animação adequados
     def draw(self):
         self.image = pygame.image.load(self.car_type[self.get_next_animation_index()]).convert_alpha()
 
@@ -248,7 +248,7 @@ class EmergencyCar(pygame.sprite.Sprite):
 
         self.screen.blit(rotated_image, self.rect.topleft)
 
-    # Atualiza a posição do carro no mapa
+    # ciclo principal de comportamento do veículo emergência
     def update(self):
         if self.is_turning[0]:
             self.handle_turning()
@@ -258,7 +258,7 @@ class EmergencyCar(pygame.sprite.Sprite):
             if not self.is_car_stopped: self.fires_car(speed=4)
             self.go_forward()
 
-    # Altera a imagem do veiculo sequencialmente para simular animação na sirene
+    # alterna frames da textura para simular piscar das sirenes
     def get_next_animation_index(self):
         animation_frame = 20
         max_index = len(self.car_type) - 1
@@ -272,34 +272,34 @@ class EmergencyCar(pygame.sprite.Sprite):
 
         return self.animation_index
 
-    # Ativa a flag de mudança de direção
+    # marca início de alteração de trajetória
     def activate_changing_direction(self):
         self.is_changing_direction = True
 
-    # Desativa a flag de mudança de direção
+    # remove marca de alteração de trajetória
     def disable_changing_direction(self):
         self.is_changing_direction = False
 
-    # Retorna se o carro está a mudar de direção
+    # verifica se há mudança de direção em progresso
     def is_car_changing_direction(self):
         return self.is_changing_direction
 
-    # Força o veiculo a mudar de faixa para seguir uma direção diferente aquela que ia seguir anteriormente
+    # força ajuste de trajetória para faixa diferente da planeada
     def change_direction(self, lane):
-        # Desativa a flag de viragem para cancelar a direção que ia tomar
+        # cancela direção previamente configurada
         self.flag_car_is_turning(False)
 
-        # Para a posição atual define para que faixas pode ir
+        # mapeia transições válidas entre faixas
         POSSIBLE_LANES = {
             "l": ["r"],
             "c": ["l", "r"],
             "r": ["l"],
         }
 
-        # Dada posição atual, randomiza para que faixa vai mudar
+        # escolhe aleatoriamente destino de mudança de faixa
         new_direction = random.choice(POSSIBLE_LANES[lane])
 
-        # Dependendo da direção e do angulo do carro define em que coordenada tem que incrementar para que possa mudar de faixa
+        # ajusta posição horizontal/vertical conforme ângulo e faixa destino
         if new_direction == "l":
             if self.angle == 0:
                 self.rect.x -= 24
@@ -320,7 +320,7 @@ class EmergencyCar(pygame.sprite.Sprite):
             elif self.angle == -360:
                 self.rect.x -= 24
 
-            # Muda a variável do objeto onde fica a direção que o carro vai tomar para a nova direção escolhida
+            # redefine próxima conversão baseada na faixa atual
             self.next_turn_direction = Directions.LEFT if lane == "c" else Directions.FORWARD
 
         if new_direction == "r":
@@ -343,5 +343,5 @@ class EmergencyCar(pygame.sprite.Sprite):
             elif self.angle == -360:
                 self.rect.x += 24
 
-            # Muda a variável do objeto onde fica a direção que o carro vai tomar para a nova direção escolhida
+            # atualiza próxima manobra de acordo com nova posição
             self.next_turn_direction = Directions.RIGHT if lane == "c" else Directions.FORWARD

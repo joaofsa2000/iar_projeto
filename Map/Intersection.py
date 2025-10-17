@@ -7,6 +7,6 @@ class Intersection(pygame.sprite.Sprite):
     def __init__(self, x, y):
         super().__init__()
 
-        #Desenha a interseção no mapa
-        self.image = pygame.image.load('Map/Resources/Intersection.png').convert_alpha()
+        # carrega e posiciona o sprite da interseção nas coordenadas fornecidas
+        self.image = pygame.image.load('Map/Resources/intersecao.png').convert_alpha()
         self.rect = self.image.get_rect(topleft=(x, y))

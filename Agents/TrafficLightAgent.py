@@ -8,9 +8,6 @@ from Models.LightStatus import LightStatus
 
 class TrafficLightAgent(Agent):
     def __init__(self, jid, password, traffic_lights, environment, offset_seconds=0):
-        """
-        :param offset_seconds: atraso inicial do ciclo deste cruzamento (para desfasar em relação aos outros)
-        """
         super().__init__(jid, password)
         self.environment = environment
         self.traffic_lights = []
