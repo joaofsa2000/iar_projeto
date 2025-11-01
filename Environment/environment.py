@@ -113,7 +113,7 @@ class Environment:
 
     def add_car(self, car_id):
         car = pygame.sprite.GroupSingle()
-        car.add(Car(self.screen, str(car_id).replace("car_", "").replace("@localhost", "")))
+        car.add(Car(self.screen, str(car_id).replace("carro_", "").replace("@localhost", "")))
         self.cars.append(car)
 
         self.car_positions[str(car_id)] = car.sprites()[0].get_car_position()
