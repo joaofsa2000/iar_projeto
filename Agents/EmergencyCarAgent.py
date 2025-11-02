@@ -135,6 +135,12 @@ class EmergencyCarAgent(Agent):
                         print(f"[EMERGENCY CAR {self.agent.jid}] FAILURE recebido (conv-id: {conv_id})")
                         print(f"[EMERGENCY CAR {self.agent.jid}] Erro: {msg.body}")
 
+        class IgnoreLateBehaviour(CyclicBehaviour):
+            """Ignora mensagens que chegam após o agente parar"""
+
+            async def run(self):
+                msg = await self.receive(timeout=0.1)
+
         template = Template()
         template.set_metadata("protocol", "fipa-request")
         self.add_behaviour(ReceiveResponseBehaviour(), template)

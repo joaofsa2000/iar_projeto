@@ -169,7 +169,7 @@ class MapUpdaterAgent(Agent):
                 # Pode enviar para agentes específicos se necessário
                 # await self.broadcast_to_all_agents(alert_msg)
 
-        # Descomente para ativar broadcast periódico
+        # ativar broadcast periódico
         # broadcast_interval = 30
         # start_at = datetime.now() + timedelta(seconds=broadcast_interval)
         # self.add_behaviour(BroadcastAlertBehaviour(period=broadcast_interval, start_at=start_at))

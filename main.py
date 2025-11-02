@@ -194,7 +194,7 @@ async def main():
 
     # Cria e inicia agentes carros (com FIPA Subscribe Protocol)
     print("[SETUP] Iniciando agentes de carros com FIPA Subscribe Protocol...")
-    for x in range(5):  # Aumentado para 5 carros
+    for x in range(5):
         car = CarAgent(f"carro_{x}@localhost", "pass", environment)
         await car.start(auto_register=True)
 
@@ -218,18 +218,56 @@ async def main():
         print("ENCERRANDO SIMULAÇÃO...")
         print("=" * 80)
 
-        # Guarda dados
+        # Guarda dados de espera
+        print("Guardando dados de tempos de espera...")
         environment.write_on_csv(environment.cars_stopped_times)
 
-        # Para todos os agentes SPADE
-        print("Parando agentes...")
+        # Para todos os agentes SPADE de forma ordenada
+        print("Parando agentes de semáforos...")
         for tl in tl_agents:
-            await tl.stop()
-        await map_updater.stop()
-        # (carros param automaticamente quando o loop termina)
+            try:
+                await tl.stop()
+            except Exception as e:
+                print(f"Erro ao parar semáforo: {e}")
 
+        print("Parando agente central...")
+        try:
+            await map_updater.stop()
+        except Exception as e:
+            print(f"Erro ao parar map updater: {e}")
+
+        # Estatísticas da simulação
+        print("\n" + "=" * 80)
+        print("ESTATÍSTICAS DA SIMULAÇÃO")
+        print("=" * 80)
+
+        total_stops = len(environment.cars_stopped_times)
+        print(f"Total de paragens em semáforos: {total_stops}")
+
+        if total_stops > 0:
+            # Converter tempos para segundos e calcular média
+            from datetime import datetime
+            total_seconds = 0
+            for stop in environment.cars_stopped_times:
+                # stop = (semaforo_id, carro_id, tempo_string)
+                time_str = stop[2]  # Formato: "0:00:05"
+                time_parts = time_str.split(":")
+                hours = int(time_parts[0])
+                minutes = int(time_parts[1])
+                seconds = int(time_parts[2])
+                total_seconds += hours * 3600 + minutes * 60 + seconds
+
+            avg_wait = total_seconds / total_stops
+            print(f"Tempo médio de espera: {avg_wait:.2f}s")
+            print(f"Tempo total de espera acumulado: {total_seconds}s")
+        else:
+            print("Nenhuma paragem registada (simulação muito curta)")
+
+        print("=" * 80)
+
+        # Pygame
         pygame.quit()
-        print("Sistema encerrado com sucesso!")
+        print("\nSistema encerrado com sucesso!")
 
 
 if __name__ == "__main__":
