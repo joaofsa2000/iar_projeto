@@ -3,7 +3,7 @@ import asyncio
 import pygame
 import spade
 from Agents.CarAgent import CarAgent
-from Agents.MapUpdaterAgent import MapUpdaterAgent
+from Agents.CoordenatorAgent import MapUpdaterAgent
 from Agents.TrafficLightAgent import TrafficLightAgent
 
 from Environment.environment import Environment
@@ -177,7 +177,7 @@ async def main():
         await tl.start(auto_register=True)
 
     # Cria e inicia todos os agentes carros
-    for x in range(30):
+    for x in range(5):
         car = CarAgent(f"car_{x}@localhost", "pass", environment)
         await car.start(auto_register=True)
     try:

@@ -39,69 +39,49 @@ class TrafficLightAgent(Agent):
         self.traffic_lights.append(self.environment.add_traffic_light(jid, traffic_lights.id + "_r_r", traffic_lights.right_tl.right_tl.coordinate, traffic_lights.right_tl.right_tl.angle))
 
     async def setup(self):
-        class PeriodicBehav(PeriodicBehaviour):
+        # O ciclo de decisão local foi desativado: o Coordenador passa a controlar os semáforos.
+        # Este agente agora executa comandos vindos do Coordenador.
+
+        # Comportamento: recebe comandos do Coordenador para definir fases ou colocar tudo a vermelho
+        class ReceiveCoordinatorCommandsBehav(CyclicBehaviour):
             async def run(self):
-                # Coloca todos a vermelho antes de abrir os verdes
-                for tl in self.agent.traffic_lights:
-                    tl.change_status(LightStatus.RED)
-                    self.agent.environment.update_traffic_light_status(tl.id, LightStatus.RED)
+                msg = await self.receive(timeout=60)
+                if not msg or not msg.metadata:
+                    return
 
-                # Cria uma lista com todos os semaforos que têm carros parados deste agente
-                new_list = {}
-                for tl in self.agent.traffic_lights:
-                    if (tl.id in self.agent.environment.cars_stopped_at_tl
-                            and len(self.agent.environment.cars_stopped_at_tl[tl.id]) > 0):
-                        new_list[tl.id] = self.agent.environment.cars_stopped_at_tl[tl.id]
+                action = msg.metadata.get("action")
+                if action == "all_red":
+                    # Coloca todos os semáforos deste cruzamento a vermelho
+                    for tl in self.agent.traffic_lights:
+                        tl.change_status(LightStatus.RED)
+                        self.agent.environment.update_traffic_light_status(tl.id, LightStatus.RED)
+                    return
 
-                # Ordenar a lista de carros parados nos semaforos
-                sorted_tuples = sorted(new_list.items(), key=lambda x: len(x[1]), reverse=True)
-                lista_ordenada = dict(sorted_tuples)
+                if action == "set_phase":
+                    # Espera metadado 'open_tls' com lista CSV de ids a abrir
+                    open_csv = msg.metadata.get("open_tls", "")
+                    open_list = [x.strip() for x in open_csv.split(",") if x.strip()]
 
-                if len(lista_ordenada) > 0:
-                    tl_to_open = list(lista_ordenada.keys())[0]
-                    blocked_turn = ""
+                    # Primeiro, tudo vermelho
+                    for tl in self.agent.traffic_lights:
+                        tl.change_status(LightStatus.RED)
+                        self.agent.environment.update_traffic_light_status(tl.id, LightStatus.RED)
 
-                    #No caso do semáforo com mais carros estar com o caminho bloqueado por causa do acidente ele avança para o seguinte com mais carros
-                    for tl in lista_ordenada.keys():
-                        if not self.agent.environment.map_crash:
-                            tl_to_open = tl
-                            break
+                    # Depois, abrir os indicados
+                    for open_id in open_list:
+                        if open_id in self.agent.environment.traffic_lights_objects:
+                            tl = self.agent.environment.traffic_lights_objects[open_id]
+                            tl.change_status(LightStatus.GREEN)
+                            self.agent.environment.update_traffic_light_status(tl.id, LightStatus.GREEN)
+                            if tl.id in self.agent.environment.cars_stopped_at_tl:
+                                self.agent.environment.cars_stopped_at_tl[tl.id].clear()
 
-                        blocked_turn = self.agent.environment.get_blocked_turn(tl, self.agent.environment.crash_location)
-                        
-                        if blocked_turn and blocked_turn == str(tl).split("_")[3]:
-                            continue
-                        else:
-                            tl_to_open = tl
-                            break
-
-                    # cria lista para abrir todos os semaforos que tiverem carros ( no mesmo sentido )
-                    new_tls = []
-                    blocked_turn = self.agent.environment.get_blocked_turn(tl_to_open, self.agent.environment.crash_location)
-
-                    #Ao abrir um determinado semafóro ele automaticamente abre também os semafóros das faixas do lado, no vaso de estes terem carros
-                    for direction in ['l', 'c', 'r']:
-                        if direction == blocked_turn: continue
-
-                        new_tl = tl_to_open[:-1] + direction
-                        if (new_tl in self.agent.environment.cars_stopped_at_tl
-                                and len(self.agent.environment.cars_stopped_at_tl[new_tl]) > 0):
-                            new_tls.append(new_tl)
-                    
-                    #Muda o estado do semáforo para verde no mapa e no ambiente
-                    for new_tl in new_tls:
-                        tl = self.agent.environment.traffic_lights_objects[str(new_tl)]
-                        tl.change_status(LightStatus.GREEN)
-                        self.agent.environment.update_traffic_light_status(tl.id, LightStatus.GREEN)
-                        self.agent.environment.cars_stopped_at_tl[tl.id].clear()
-
-                lista_ordenada.clear()
-
-        start_at = datetime.now() + timedelta(seconds=2)
-        period = PeriodicBehav(period=10, start_at=start_at)
-        self.add_behaviour(period)
+        # Aceita mensagens inform do Coordenador
+        coord_template = Template()
+        coord_template.set_metadata("performative", "inform")
+        self.add_behaviour(ReceiveCoordinatorCommandsBehav(), coord_template)
         
-        #Comportamento responsável por receber mensagens dos veiculos de emergencia a pedir para mudar o estado para verde
+        #Comportamento responsável por receber mensagens diretas dos veiculos de emergencia (legado)
         class ReceiveMsgBehav(CyclicBehaviour):
             def __init__(self):
                 super().__init__()
