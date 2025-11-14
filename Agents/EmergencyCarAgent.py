@@ -37,12 +37,6 @@ class EmergencyCarAgent(Agent):
                 self.car = self.agent.car_obj
                 self.env = self.agent.environment
                 self.is_msg_sent = False
-                # Antecipação do pedido (~1 segundo antes de chegar ao semáforo vermelho)
-                # Distância aproximada em pixeis para 1s, ajustável conforme a cadência do jogo.
-                self.ANTECIPACAO_SEG = 1.0
-                self.ANTECIPACAO_DIST_PX = 120
-                # Guarda o último semáforo para o qual já foi pedido prioridade, para não repetir
-                self.last_requested_tl_id = None
 
             async def run(self):
                 # Veiculo de emergencia termina quando sai do mapa (is_car_done)
@@ -55,63 +49,13 @@ class EmergencyCarAgent(Agent):
                 # Atualiza o objeto no mapa
                 self.car.sprites()[0].update()
 
-            def _get_ahead_red_tl(self, car_sprite, antecipacao_px):
-                # Calcula uma zona à frente do carro (retângulo aproximado) e procura
-                # semáforos vermelhos dentro dessa zona, escolhendo o mais próximo.
-                angle = car_sprite.angle
-                radians = math.radians(angle)
-                # Direção de avanço (na convenção atual do movimento)
-                dx = -math.sin(radians)
-                dy = -math.cos(radians)
-
-                cx, cy = car_sprite.rect.centerx, car_sprite.rect.centery
-
-                # Comprimento da zona de antecipação
-                length = int(antecipacao_px)
-                # Largura aproximada com base no sprite do carro
-                width = max(car_sprite.rect.width, car_sprite.rect.height)
-
-                # Construir um retângulo axis-aligned que cobre pontos à frente do carro
-                steps = 5
-                points = []
-                for i in range(1, steps + 1):
-                    px = int(cx + dx * (length * i / steps))
-                    py = int(cy + dy * (length * i / steps))
-                    points.append((px, py))
-                minx = min([p[0] for p in points] + [cx]) - width // 2
-                maxx = max([p[0] for p in points] + [cx]) + width // 2
-                miny = min([p[1] for p in points] + [cy]) - width // 2
-                maxy = max([p[1] for p in points] + [cy]) + width // 2
-                lookahead_rect = pygame.Rect(minx, miny, maxx - minx, maxy - miny)
-
-                candidate = None
-                cand_dist2 = None
-                for tl in self.env.traffic_lights:
-                    # Só consideramos semáforos que estão vermelhos
-                    if self.env.get_traffic_light_status(tl.id) != LightStatus.RED:
-                        continue
-                    if lookahead_rect.colliderect(tl.rect):
-                        # Confirmar que está à frente (produto escalar positivo)
-                        vx = tl.rect.centerx - cx
-                        vy = tl.rect.centery - cy
-                        if vx * dx + vy * dy <= 0:
-                            continue
-                        d2 = vx * vx + vy * vy
-                        if candidate is None or d2 < cand_dist2:
-                            candidate = tl
-                            cand_dist2 = d2
-
-                return candidate.id if candidate else None
-
             async def move(self):
-                # 1) Disparo antecipado (~1s antes) se houver um semáforo vermelho à frente
-                ahead_tl_id = self._get_ahead_red_tl(self.car.sprites()[0], self.ANTECIPACAO_DIST_PX)
-                if ahead_tl_id and self.last_requested_tl_id != ahead_tl_id:
-                    msg_behav = SendMsgBehav(self.env.get_traffic_light_jid_by_id(ahead_tl_id), ahead_tl_id)
-                    self.agent.add_behaviour(msg_behav)
-                    self.is_msg_sent = True
-                    self.last_requested_tl_id = ahead_tl_id
-                    print(f"EMERGENCY PRE-REQUEST ~{self.ANTECIPACAO_SEG}s BEFORE for TL {ahead_tl_id}")
+                # Antes de colidir com o TL, tentar preempção por aproximação
+                try:
+                    await self.try_preempt_on_approach()
+                except Exception:
+                    # Em caso de qualquer erro na deteção, seguir fluxo normal
+                    pass
 
                 # Verifica se o veiculo está num semáforo
                 is_tl_collided, tl_id = self.env.collision_traffic_light(self.car.sprites()[0])
@@ -127,9 +71,9 @@ class EmergencyCarAgent(Agent):
 
                     self.env.emergency_cars_awaiting_time[self.agent.guid] = current_awaiting_time + 1
 
-                    # Envia um pedido ao Semáforo para ficar verde
+                    # Envia um pedido (ao Coordenador se existir; caso contrário, diretamente ao Semáforo) para ficar verde
                     if not self.is_msg_sent:
-                        msg_behav = SendMsgBehav(self.env.get_traffic_light_jid_by_id(tl_id), tl_id)
+                        msg_behav = SendMsgBehav(self.env, tl_id)
                         self.agent.add_behaviour(msg_behav)
                         self.is_msg_sent = True
 
@@ -146,9 +90,7 @@ class EmergencyCarAgent(Agent):
                     # Estando o semáforo verde avança
                     self.car.sprites()[0].disable_changing_direction()
                     self.car.stopped_at_tl_id = False
-                    # Reset parcial: o pedido anterior deixa de ser relevante após passar o cruzamento
                     self.is_msg_sent = False
-                    self.last_requested_tl_id = None
 
                     if self.env.collision_sprite(self.car.sprites()[0]):
                         self.car.sprites()[0].fires_car()
@@ -162,26 +104,130 @@ class EmergencyCarAgent(Agent):
         self.add_behaviour(behaviour)
 
         class SendMsgBehav(OneShotBehaviour):
-            def __init__(self, tl_jid, tl_id):
+            def __init__(self, env, tl_id):
                 super().__init__()
-                # Mantemos a referência do semáforo alvo, mas o pedido
-                # passa a ser enviado ao agente coordenador, que fará o encaminhamento.
-                self.tl_jid = tl_jid
+                self.env = env
                 self.tl_id = tl_id
 
             # Envia mensagem para o agente Semáforo no qual o veiculo está parado a pedir que altere o seu estado para verde
             async def run(self):
-                print("EMERGENCY REQUESTING GREEN LIGHT (to coordinator)")
-                # Envia agora para o agente Coordenador (map_updater)
-                # que fará o encaminhamento para o Semáforo correto.
-                coordinator_jid = "map_updater@localhost"
-                msg = Message(to=coordinator_jid)
+                print("EMERGENCY REQUESTING GREEN LIGHT")
+                # Se houver coordenador ativo, enviar pedido ao coordenador;
+                # caso contrário, enviar diretamente ao agente do semáforo atual
+                if getattr(self.env, "coordinator_enabled", False) and getattr(self.env, "coordinator_jid", None):
+                    to_jid = self.env.coordinator_jid
+                    action = "emergency_request"
+                else:
+                    to_jid = self.env.get_traffic_light_jid_by_id(self.tl_id)
+                    action = "change_status"
+
+                msg = Message(to=to_jid)
                 msg.set_metadata("performative", "request")
-                msg.set_metadata("action", "change_status")
+                msg.set_metadata("action", action)
                 msg.set_metadata("traffic_light", self.tl_id)
                 msg.body = "Emergency Vehicle Requesting Green Light"
 
                 await self.send(msg)
-                print("Request Made - Msg Sent to Coordinator")
+                print("Request Made - Msg Sent")
 
                 self.exit_code = "Job Finished!"
+
+        # ------------------------- AUX/APPROACH LOGIC -------------------------
+        async def try_preempt_on_approach(self):
+            """
+            Se existir um semáforo à frente (na mesma linha/faixa) dentro de uma
+            distância de aproximação e ele estiver vermelho, envia pedido de
+            prioridade antes de o veículo parar.
+            """
+            car_sprite = self.car_obj.sprites()[0]
+            car_x, car_y, angle = car_sprite.get_car_position()
+
+            # Parâmetros de deteção (px)
+            APPROACH_DISTANCE = 150
+            LATERAL_TOL = 60
+
+            side = _side_from_angle(angle)
+            if not side:
+                return
+
+            candidate = None
+            best_ahead_dist = None
+
+            for tl_id, tl_obj in self.environment.traffic_lights_objects.items():
+                parts = str(tl_id).split("_")
+                if len(parts) < 4:
+                    continue
+                side_letter = parts[2]  # t, b, l, r
+
+                if side_letter != side:
+                    continue
+
+                tl_cx, tl_cy = tl_obj.rect.centerx, tl_obj.rect.centery
+
+                # Determina se o TL está "à frente" e dentro dos limiares
+                ahead = False
+                axis_dist = None
+
+                if side == 'b':  # a subir (angle ~0): TL à frente tem y < carro
+                    axis_dist = car_y - tl_cy
+                    ahead = 0 < axis_dist <= APPROACH_DISTANCE and abs(car_x - tl_cx) <= LATERAL_TOL
+                elif side == 't':  # a descer (angle ~180): TL à frente tem y > carro
+                    axis_dist = tl_cy - car_y
+                    ahead = 0 < axis_dist <= APPROACH_DISTANCE and abs(car_x - tl_cx) <= LATERAL_TOL
+                elif side == 'l':  # a ir para a direita (angle ~-90): TL à frente tem x > carro
+                    axis_dist = tl_cx - car_x
+                    ahead = 0 < axis_dist <= APPROACH_DISTANCE and abs(car_y - tl_cy) <= LATERAL_TOL
+                elif side == 'r':  # a ir para a esquerda (angle ~90): TL à frente tem x < carro
+                    axis_dist = car_x - tl_cx
+                    ahead = 0 < axis_dist <= APPROACH_DISTANCE and abs(car_y - tl_cy) <= LATERAL_TOL
+
+                if not ahead:
+                    continue
+
+                # Apenas interessa se está vermelho neste momento
+                try:
+                    if self.environment.get_traffic_light_status(tl_id) != LightStatus.RED:
+                        continue
+                except Exception:
+                    continue
+
+                # Escolher o mais próximo ao longo do eixo
+                if best_ahead_dist is None or axis_dist < best_ahead_dist:
+                    best_ahead_dist = axis_dist
+                    candidate = tl_id
+
+            if candidate and not self.is_msg_sent:
+                # Envia pedido de preempção igual ao de paragem (via coordenador, se existir)
+                msg_behav = SendMsgBehav(self.environment, candidate)
+                self.add_behaviour(msg_behav)
+                self.is_msg_sent = True
+
+
+def _side_from_angle(angle):
+    """
+    Mapeia o ângulo de movimento para a "side" do TL que o veículo enfrenta.
+    0 (subir)  -> 'b'
+    180 (descer) -> 't'
+    -90 (direita) -> 'l'
+    90 (esquerda) -> 'r'
+    Usa tolerância para ângulos próximos.
+    """
+    # Normalizar ângulo para [-180, 180]
+    a = angle
+    while a > 180:
+        a -= 360
+    while a <= -180:
+        a += 360
+
+    def near(x):
+        return abs(a - x) <= 30  # tolerância de 30º
+
+    if near(0):
+        return 'b'
+    if near(180) or near(-180):
+        return 't'
+    if near(-90):
+        return 'l'
+    if near(90):
+        return 'r'
+    return None

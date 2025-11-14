@@ -72,6 +72,11 @@ class Environment:
         self.crash_position = (0, 0)
         self.crash_location = ""
 
+        # Modo coordenado: quando True, os semáforos são comandados por um agente coordenador
+        self.coordinator_enabled = False
+        # JID do agente coordenador (preenchido quando o coordenador arranca)
+        self.coordinator_jid = None
+
     #Valida se existe colisão de um carro com um cruzamento
     #Se sim, retorna True, se não retorno False
     def collision_sprite(self, sprite):
