@@ -14,6 +14,10 @@ from spade.template import Template
 from Models.LightStatus import LightStatus
 
 
+# Threshold in seconds before requesting green light
+GREEN_REQUEST_THRESHOLD = 30
+
+
 class CarAgent(Agent):
     def __init__(self, jid, password, environment):
         super().__init__(jid, password)
@@ -26,6 +30,11 @@ class CarAgent(Agent):
         # Controlo de subscrições aos semáforos
         self.subscribed_traffic_lights = {}  # {tl_jid: subscription_id}
         self.current_traffic_light = None
+        
+        # Waiting time tracking for green light requests
+        self.waiting_start_time = None
+        self.green_request_sent = False
+        self.pending_green_requests = {}  # {conv_id: tl_jid}
 
     async def setup(self):
         print(f"[CAR {self.jid}] Agente iniciado")
@@ -59,6 +68,13 @@ class CarAgent(Agent):
                     self.car.stopped_at_tl_start_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     await self.set_cars_at_traffic_light(tl_id)
 
+                    # Track waiting time for green light request
+                    if self.agent.waiting_start_time is None:
+                        self.agent.waiting_start_time = datetime.now()
+                    
+                    # Check if we should request green light
+                    await self.check_and_request_green(tl_id)
+
                     # FIPA SUBSCRIBE PROTOCOL - Subscreve ao semáforo se ainda não subscreveu
                     # Cancela subscrição anterior se mudou de semáforo
                     if self.agent.current_traffic_light and self.agent.current_traffic_light != tl_id:
@@ -73,6 +89,10 @@ class CarAgent(Agent):
                         await self.cancel_subscription(self.agent.current_traffic_light)
                         self.agent.current_traffic_light = None
 
+                    # Reset waiting time tracking when moving
+                    self.agent.waiting_start_time = None
+                    self.agent.green_request_sent = False
+
                     if self.env.collision_sprite(self.car.sprites()[0]):
                         self.car.sprites()[0].fires_car()
                         self.car.sprites()[0].activate_turning()
@@ -85,6 +105,35 @@ class CarAgent(Agent):
                         await self.set_cars_stopped_times()
 
                     self.car.stopped_at_tl_id = False
+
+            async def check_and_request_green(self, tl_id):
+                """Check waiting time and request green light if threshold exceeded."""
+                if self.agent.green_request_sent:
+                    return
+                
+                if self.agent.waiting_start_time:
+                    waiting_duration = (datetime.now() - self.agent.waiting_start_time).total_seconds()
+                    
+                    if waiting_duration >= GREEN_REQUEST_THRESHOLD:
+                        await self.request_green_light(tl_id)
+                        self.agent.green_request_sent = True
+
+            async def request_green_light(self, tl_id):
+                """Send FIPA Request to traffic light requesting green."""
+                tl_jid = self.env.get_traffic_light_jid_by_id(tl_id)
+                conv_id = str(uuid.uuid4())
+                
+                msg = Message(to=tl_jid)
+                msg.set_metadata("performative", "request")
+                msg.set_metadata("protocol", "fipa-request")
+                msg.set_metadata("conversation-id", conv_id)
+                msg.set_metadata("action", "request_green")
+                msg.set_metadata("traffic_light_id", str(tl_id))
+                msg.body = f"GREEN_REQUEST: Car {self.id} has been waiting for {GREEN_REQUEST_THRESHOLD}+ seconds at {tl_id}"
+                
+                await self.send(msg)
+                self.agent.pending_green_requests[conv_id] = tl_jid
+                print(f"[CAR {self.agent.jid}] REQUEST GREEN enviado para {tl_jid} (esperando há mais de {GREEN_REQUEST_THRESHOLD}s)")
 
             async def subscribe_to_traffic_light(self, tl_id):
                 """Subscreve ao semáforo usando FIPA Subscribe Protocol"""
@@ -211,7 +260,51 @@ class CarAgent(Agent):
                             print(f"[CAR {self.agent.jid}] Semáforo ficou VERDE! Preparar para avançar")
                         elif "RED" in msg.body:
                             print(f"[CAR {self.agent.jid}] Semáforo ficou VERMELHO!")
+                        elif "YELLOW" in msg.body:
+                            print(f"[CAR {self.agent.jid}] Semáforo ficou AMARELO! Atenção")
 
         template = Template()
         template.set_metadata("protocol", "fipa-subscribe")
         self.add_behaviour(ReceiveNotificationBehaviour(), template)
+
+        # Comportamento para receber respostas de pedidos de luz verde
+        class ReceiveGreenResponseBehaviour(CyclicBehaviour):
+            async def run(self):
+                msg = await self.receive(timeout=1)
+
+                if msg and msg.get_metadata("protocol") == "fipa-request":
+                    performative = msg.get_metadata("performative")
+                    conv_id = msg.get_metadata("conversation-id")
+
+                    if conv_id in self.agent.pending_green_requests:
+                        if performative == "agree":
+                            print(f"[CAR {self.agent.jid}] AGREE recebido para pedido de luz verde")
+                        elif performative == "inform":
+                            print(f"[CAR {self.agent.jid}] INFORM recebido: {msg.body}")
+                            del self.agent.pending_green_requests[conv_id]
+                        elif performative == "refuse":
+                            print(f"[CAR {self.agent.jid}] REFUSE recebido: {msg.body}")
+                            del self.agent.pending_green_requests[conv_id]
+                        elif performative == "failure":
+                            print(f"[CAR {self.agent.jid}] FAILURE recebido: {msg.body}")
+                            del self.agent.pending_green_requests[conv_id]
+
+        template_request = Template()
+        template_request.set_metadata("protocol", "fipa-request")
+        self.add_behaviour(ReceiveGreenResponseBehaviour(), template_request)
+
+        # Comportamento para receber alertas de broadcast
+        class ReceiveBroadcastBehaviour(CyclicBehaviour):
+            async def run(self):
+                msg = await self.receive(timeout=1)
+                
+                if msg and msg.get_metadata("protocol") == "fipa-inform":
+                    performative = msg.get_metadata("performative")
+                    
+                    if performative == "inform":
+                        print(f"[CAR {self.agent.jid}] Broadcast recebido: {msg.body}")
+                        # React to system alerts if needed (e.g., congestion warnings)
+
+        template_inform = Template()
+        template_inform.set_metadata("protocol", "fipa-inform")
+        self.add_behaviour(ReceiveBroadcastBehaviour(), template_inform)

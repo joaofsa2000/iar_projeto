@@ -19,6 +19,19 @@ class MapUpdaterAgent(Agent):
         super().__init__(jid, password)
         self.environment = environment
         self.id = jid
+        
+        # List of all registered agent JIDs for broadcasting
+        self.registered_agents = []
+        
+        # Traffic light agent JIDs
+        self.traffic_light_jids = [
+            "semaforos_1@localhost",
+            "semaforos_2@localhost",
+            "semaforos_3@localhost",
+            "semaforos_4@localhost",
+            "semaforos_5@localhost",
+            "semaforos_6@localhost",
+        ]
 
     async def setup(self):
         print(f"[MAP UPDATER {self.jid}] Agente central iniciado")
@@ -50,10 +63,10 @@ class MapUpdaterAgent(Agent):
         period = EmergencySpawnBehaviour(period=emergency_interval, start_at=start_at)
         self.add_behaviour(period)
 
-        # Comportamento periódico (25s) para previsão de acidentes via Machine Learning
-        class CrashPredictionBehaviour(PeriodicBehaviour):
+        # Comportamento periódico (25s) para análise de congestionamento
+        class CongestionAnalysisBehaviour(PeriodicBehaviour):
             async def run(self):
-                print(f"[MAP UPDATER {self.agent.jid}] Analisando risco de acidentes...")
+                print(f"[MAP UPDATER {self.agent.jid}] Analisando congestionamento...")
 
                 # Inicializa contadores para cada cruzamento
                 CROSSES = {
@@ -69,7 +82,8 @@ class MapUpdaterAgent(Agent):
                 cars_stopped = self.agent.environment.cars_stopped_at_tl
                 for x in cars_stopped:
                     cross = x[:-4]
-                    CROSSES[cross] += len(self.agent.environment.cars_stopped_at_tl[x])
+                    if cross in CROSSES:
+                        CROSSES[cross] += len(self.agent.environment.cars_stopped_at_tl[x])
 
                 max_cross = max(CROSSES, key=lambda k: CROSSES[k])
                 vehicle_count = max(CROSSES.values())
@@ -77,13 +91,19 @@ class MapUpdaterAgent(Agent):
                 print(
                     f"[MAP UPDATER {self.agent.jid}] Cruzamento mais congestionado: {max_cross} ({vehicle_count} veículos)")
 
-                # Simular previsão de acidente (pode ser substituído por modelo ML real)
-                crash_risk = vehicle_count > 5  # Exemplo simples
+                # Calculate congestion levels for all intersections
+                for intersection_id in CROSSES:
+                    self.agent.environment.calculate_congestion_level(intersection_id)
 
-                if crash_risk:
-                    print(f"[MAP UPDATER {self.agent.jid}] RISCO DE ACIDENTE ALTO em {max_cross}!")
+                # High congestion threshold
+                if vehicle_count > 5:
+                    print(f"[MAP UPDATER {self.agent.jid}] ALERTA DE CONGESTIONAMENTO em {max_cross}!")
+                    
                     # FIPA REQUEST PROTOCOL - Solicitar aos semáforos para ajustar tempos
                     await self.request_traffic_adjustment(max_cross, vehicle_count)
+                    
+                    # Broadcast alert to all agents
+                    await self.agent.broadcast_alert(f"CONGESTION_ALERT: High traffic at {max_cross} ({vehicle_count} vehicles)")
 
             async def request_traffic_adjustment(self, crossing, vehicle_count):
                 """Envia pedido aos semáforos para ajustar ciclos (FIPA Request Protocol)"""
@@ -116,9 +136,9 @@ class MapUpdaterAgent(Agent):
             async def on_end(self):
                 await self.agent.stop()
 
-        crash_interval = 25
-        start_at = datetime.now() + timedelta(seconds=crash_interval)
-        period = CrashPredictionBehaviour(period=crash_interval, start_at=start_at)
+        congestion_interval = 25
+        start_at = datetime.now() + timedelta(seconds=congestion_interval)
+        period = CongestionAnalysisBehaviour(period=congestion_interval, start_at=start_at)
         self.add_behaviour(period)
 
         # Comportamento para receber respostas dos semáforos
@@ -151,7 +171,7 @@ class MapUpdaterAgent(Agent):
         self.add_behaviour(ReceiveTrafficResponseBehaviour(), template)
 
         # ============================================================
-        # FIPA INFORM PROTOCOL - Broadcast de Alertas
+        # FIPA INFORM PROTOCOL - Broadcast de Alertas Periódicos
         # ============================================================
         class BroadcastAlertBehaviour(PeriodicBehaviour):
             """Envia alertas periódicos sobre o estado do sistema"""
@@ -160,16 +180,66 @@ class MapUpdaterAgent(Agent):
                 # Coleta estatísticas do sistema
                 total_cars = len(self.agent.environment.car_positions)
                 total_stopped = sum(len(cars) for cars in self.agent.environment.cars_stopped_at_tl.values())
+                avg_speed = self.agent.environment.get_average_speed()
 
-                # Broadcast INFORM para todos os agentes (exemplo)
-                alert_msg = f"SYSTEM_STATUS: {total_cars} vehicles, {total_stopped} stopped at lights"
+                # Determine system status
+                if total_stopped > 10:
+                    status = "HIGH_CONGESTION"
+                elif total_stopped > 5:
+                    status = "MODERATE_TRAFFIC"
+                else:
+                    status = "NORMAL"
 
-                print(f"[MAP UPDATER {self.agent.jid}] {alert_msg}")
+                alert_msg = f"SYSTEM_STATUS: {status} | Vehicles: {total_cars} | Stopped: {total_stopped} | Avg Speed: {avg_speed:.1f}"
 
-                # Pode enviar para agentes específicos se necessário
-                # await self.broadcast_to_all_agents(alert_msg)
+                print(f"[MAP UPDATER {self.agent.jid}] Broadcasting: {alert_msg}")
 
-        # ativar broadcast periódico
-        # broadcast_interval = 30
-        # start_at = datetime.now() + timedelta(seconds=broadcast_interval)
-        # self.add_behaviour(BroadcastAlertBehaviour(period=broadcast_interval, start_at=start_at))
+                # Broadcast to all traffic light agents
+                await self.agent.broadcast_alert(alert_msg)
+
+        # Activate broadcast behavior every 30 seconds
+        broadcast_interval = 30
+        start_at = datetime.now() + timedelta(seconds=broadcast_interval)
+        self.add_behaviour(BroadcastAlertBehaviour(period=broadcast_interval, start_at=start_at))
+
+    async def broadcast_alert(self, alert_message: str):
+        """
+        Broadcast an alert message to all traffic light agents using FIPA Inform Protocol.
+        
+        Args:
+            alert_message: The alert message to broadcast
+        """
+        conv_id = str(uuid.uuid4())
+        
+        for tl_jid in self.traffic_light_jids:
+            msg = Message(to=tl_jid)
+            msg.set_metadata("performative", "inform")
+            msg.set_metadata("protocol", "fipa-inform")
+            msg.set_metadata("conversation-id", conv_id)
+            msg.body = alert_message
+            
+            await self.send(msg)
+        
+        # Also broadcast to any registered car agents
+        for car_jid in list(self.environment.car_positions.keys()):
+            try:
+                msg = Message(to=car_jid)
+                msg.set_metadata("performative", "inform")
+                msg.set_metadata("protocol", "fipa-inform")
+                msg.set_metadata("conversation-id", conv_id)
+                msg.body = alert_message
+                
+                await self.send(msg)
+            except Exception as e:
+                # Car may have left the simulation
+                pass
+
+    async def broadcast_to_all_agents(self, message: str, protocol: str = "fipa-inform"):
+        """
+        Send a message to all known agents in the system.
+        
+        Args:
+            message: The message content to send
+            protocol: The FIPA protocol to use (default: fipa-inform)
+        """
+        await self.broadcast_alert(message)

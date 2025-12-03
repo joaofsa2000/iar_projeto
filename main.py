@@ -30,7 +30,6 @@ async def main():
     print("[SETUP] Iniciando agente central (MapUpdater)...")
     map_updater = MapUpdaterAgent("central@localhost", "pass", environment)
     await map_updater.start(auto_register=True)
-
     # Definição dos semáforos
     print("[SETUP] Configurando semáforos...")
 
@@ -203,10 +202,13 @@ async def main():
     print("=" * 80)
     print("\nComportamentos esperados:")
     print("  • Carros normais subscrevem semáforos automaticamente")
-    print("  • Carros recebem notificações quando semáforos mudam")
+    print("  • Carros recebem notificações quando semáforos mudam (VERDE/AMARELO/VERMELHO)")
     print("  • Veículos de emergência surgem a cada 10s e solicitam luz verde")
     print("  • MapUpdater analisa congestionamento a cada 25s")
+    print("  • Semáforos funcionam em pares sincronizados (vertical/horizontal)")
+    print("  • Carros solicitam luz verde após 30s de espera")
     print("  • Semáforos respondem com AGREE/INFORM/FAILURE conforme protocolo FIPA")
+    print("  • Carros usam algoritmo A* para calcular rotas")
     print("=" * 80 + "\n")
 
     try:
@@ -236,34 +238,8 @@ async def main():
         except Exception as e:
             print(f"Erro ao parar map updater: {e}")
 
-        # Estatísticas da simulação
-        print("\n" + "=" * 80)
-        print("ESTATÍSTICAS DA SIMULAÇÃO")
-        print("=" * 80)
-
-        total_stops = len(environment.cars_stopped_times)
-        print(f"Total de paragens em semáforos: {total_stops}")
-
-        if total_stops > 0:
-            # Converter tempos para segundos e calcular média
-            from datetime import datetime
-            total_seconds = 0
-            for stop in environment.cars_stopped_times:
-                # stop = (semaforo_id, carro_id, tempo_string)
-                time_str = stop[2]  # Formato: "0:00:05"
-                time_parts = time_str.split(":")
-                hours = int(time_parts[0])
-                minutes = int(time_parts[1])
-                seconds = int(time_parts[2])
-                total_seconds += hours * 3600 + minutes * 60 + seconds
-
-            avg_wait = total_seconds / total_stops
-            print(f"Tempo médio de espera: {avg_wait:.2f}s")
-            print(f"Tempo total de espera acumulado: {total_seconds}s")
-        else:
-            print("Nenhuma paragem registada (simulação muito curta)")
-
-        print("=" * 80)
+        # Estatísticas da simulação (usando métricas avançadas)
+        environment.print_metrics_summary()
 
         # Pygame
         pygame.quit()

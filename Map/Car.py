@@ -5,6 +5,7 @@ import random
 import time
 import pygame
 from Models.Directions import Directions
+from Models.PathFinding import get_traffic_network, get_pathfinder, get_random_destination
 
 # imagens disponíveis para os veículos
 RED_CAR = 'Map/Resources/Cars/carro-vermelho.png'
@@ -13,11 +14,19 @@ GREEN_CAR = 'Map/Resources/Cars/carro-verde.png'
 YELLOW_CAR = 'Map/Resources/Cars/carro-amarelo.png'
 
 directions_options = [Directions.RIGHT, Directions.LEFT, Directions.FORWARD]
+
+# Entry points with their spawn position, angle, and entry ID for pathfinding
 spawning_points = [
-    ((310, 780), 0), ((669, 780), 0), ((1034, 780), 0),  # faixas inferiores
-    ((244, -50), 180), ((603, -50), 180), ((969, -50), 180),  # faixas superiores
-    ((-50, 201), -90), ((-50, 552), -90),  # faixas esquerdas
-    ((1340, 135), 90), ((1340, 486), 90)  # faixas direitas
+    ((310, 780), 0, "south_left"),      # bottom left lane going up
+    ((669, 780), 0, "south_mid"),       # bottom mid lane going up
+    ((1034, 780), 0, "south_right"),    # bottom right lane going up
+    ((244, -50), 180, "north_left"),    # top left lane going down
+    ((603, -50), 180, "north_mid"),     # top mid lane going down
+    ((969, -50), 180, "north_right"),   # top right lane going down
+    ((-50, 201), -90, "west_top"),      # left top lane going right
+    ((-50, 552), -90, "west_bottom"),   # left bottom lane going right
+    ((1340, 135), 90, "east_top"),      # right top lane going left
+    ((1340, 486), 90, "east_bottom")    # right bottom lane going left
 ]
 
 
@@ -33,8 +42,17 @@ class Car(pygame.sprite.Sprite):
         self.screen = screen
         self.car_speed = 0
         self.angle = spawning_point[1]
+        self.entry_point = spawning_point[2]
 
-        self.next_turn_direction = random.choice(directions_options)
+        # A* Pathfinding attributes
+        self.network = get_traffic_network()
+        self.pathfinder = get_pathfinder()
+        self.route = []  # List of intersection IDs to follow
+        self.current_route_index = 0
+        self.destination = None
+        
+        # Calculate initial route
+        self._calculate_route()
 
         self.car_is_turning = False
         self.car_at_traffic_light = False
@@ -56,6 +74,60 @@ class Car(pygame.sprite.Sprite):
         self.stopped_at_tl_id = False
         self.stopped_at_tl_start_time = False
 
+    def _calculate_route(self):
+        """Calculate route using A* algorithm."""
+        # Get a random destination
+        self.destination = get_random_destination(self.entry_point)
+        
+        # Get the start and end nodes
+        if self.entry_point in self.network.entry_points:
+            _, _, start_node = self.network.entry_points[self.entry_point]
+        else:
+            self.route = []
+            return
+        
+        if self.destination in self.network.exit_points:
+            _, _, end_node = self.network.exit_points[self.destination]
+        else:
+            self.route = []
+            return
+        
+        # Calculate path
+        self.route = self.pathfinder.find_path(start_node, end_node) or []
+        self.current_route_index = 0
+        
+        # Determine the turn direction for the first intersection
+        self._update_next_turn()
+
+    def _update_next_turn(self):
+        """Update the next turn direction based on the route."""
+        if not self.route or self.current_route_index >= len(self.route) - 1:
+            # No more turns needed, just go forward
+            self.next_turn_direction = Directions.FORWARD
+            return
+        
+        current_node_id = self.route[self.current_route_index]
+        next_node_id = self.route[self.current_route_index + 1]
+        
+        # Get direction from pathfinder
+        direction_str = self.pathfinder.get_direction_for_next_node(
+            current_node_id, next_node_id, self.angle
+        )
+        
+        # Convert string to Directions enum
+        if direction_str == "left":
+            self.next_turn_direction = Directions.LEFT
+        elif direction_str == "right":
+            self.next_turn_direction = Directions.RIGHT
+        else:
+            self.next_turn_direction = Directions.FORWARD
+
+    def advance_route(self):
+        """Move to the next intersection in the route."""
+        if self.current_route_index < len(self.route) - 1:
+            self.current_route_index += 1
+            self._update_next_turn()
+
     # atualiza o estado de presença em semáforo
     def set_car_at_tl(self, flag=True):
         self.car_at_traffic_light = flag
@@ -66,7 +138,9 @@ class Car(pygame.sprite.Sprite):
 
     # inicia mudança de faixa quando a rotação termina
     def flag_car_is_turning(self, flag):
-        if self.car_is_turning and not flag: self.activate_switching_lane()
+        if self.car_is_turning and not flag:
+            self.activate_switching_lane()
+            self.advance_route()  # Move to next intersection after completing turn
         self.car_is_turning = flag
 
     # implementa comportamento de wraparound nas bordas do ecrã
@@ -114,10 +188,10 @@ class Car(pygame.sprite.Sprite):
     def ending_turning(self):
         self.is_turning = (False, '')
 
-    # prepara o veículo para mudar de carril e escolhe nova direção
+    # prepara o veículo para mudar de carril baseado na próxima direção da rota
     def activate_switching_lane(self):
-        self.next_turn_direction = random.choice(directions_options)
-
+        # Use the calculated route direction instead of random
+        self._update_next_turn()
         self.is_switching_lane = (True, self.next_turn_direction)
 
     # finaliza o estado de mudança de carril

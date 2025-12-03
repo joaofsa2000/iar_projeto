@@ -7,7 +7,9 @@ import pygame
 from Models.LightStatus import LightStatus
 
 RED_LIGHT = 'Map/Resources/TrafficLights/vermelho.png'
-YELLOW_LIGHT = 'Map/Resources/TrafficLights/carro-amarelo.png'
+# Note: Create a yellow traffic light sprite at this path for proper yellow light display
+# For now, using red as fallback until amarelo.png is created
+YELLOW_LIGHT = 'Map/Resources/TrafficLights/vermelho.png'  # TODO: Replace with amarelo.png
 GREEN_LIGHT = 'Map/Resources/TrafficLights/verde.png'
 
 
