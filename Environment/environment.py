@@ -194,6 +194,7 @@ class Environment:
         self.emergency_cars_awaiting_time = {}
         self.car_positions = {}
         self.cars_stopped_at_tl = {}
+        self.car_waiting_start_times = {}  # {car_id: datetime} - tracks when each car started waiting
 
         # estruturas de dados para gestão de semáforos
         self.traffic_lights = pygame.sprite.Group()
@@ -1153,6 +1154,44 @@ class Environment:
             night_overlay.fill((0, 0, 30))
             night_overlay.set_alpha(self.day_night_overlay_alpha)
             self.game_surface.blit(night_overlay, (0, 0))
+    
+    def draw_waiting_timers(self):
+        """Draw waiting time timers on top of cars that are stopped at traffic lights.
+        Drawn to screen at native resolution for sharp text."""
+        # Use a small scaled font
+        timer_font = pygame.font.Font(None, self.s(16))
+        
+        # Draw timer for each waiting car
+        for car_id, start_time in list(self.car_waiting_start_times.items()):
+            # Calculate waiting time
+            elapsed = (datetime.now() - start_time).total_seconds()
+            
+            # Format time with 1 decimal place
+            time_text = f"{elapsed:.1f}"
+            
+            # Find the car's position (in game coordinates)
+            car_pos = self.car_positions.get(car_id)
+            if not car_pos:
+                continue
+            
+            game_x, game_y, _ = car_pos
+            
+            # Convert to screen coordinates
+            screen_x = self.sx(game_x)
+            screen_y = self.sy(game_y)
+            
+            # Render the timer text (white for visibility)
+            text_surface = timer_font.render(time_text, True, (255, 255, 255))
+            text_rect = text_surface.get_rect(center=(screen_x, screen_y))
+            
+            # Draw small dark background for readability
+            bg_rect = text_rect.inflate(self.s(4), self.s(2))
+            bg_surface = pygame.Surface((bg_rect.width, bg_rect.height), pygame.SRCALPHA)
+            bg_surface.fill((0, 0, 0, 180))  # Semi-transparent black
+            self.screen.blit(bg_surface, bg_rect)
+            
+            # Draw the text
+            self.screen.blit(text_surface, text_rect)
 
     def collision_sprite(self, sprite):
         if pygame.sprite.spritecollide(sprite, self.intersections, False):
@@ -1327,6 +1366,9 @@ class Environment:
         # ============================================================
         # DRAW UI ELEMENTS DIRECTLY TO SCREEN (sharp text at native resolution)
         # ============================================================
+        
+        # Draw waiting time timers on stopped cars (sharp text)
+        self.draw_waiting_timers()
         
         # Draw disruption UI (text labels)
         self.draw_disruption_ui()
@@ -1665,6 +1707,23 @@ class Environment:
     # obtém identificador do agente responsável por semáforo
     def get_traffic_light_jid_by_id(self, tl_id):
         return self.traffic_lights_agents_tl[str(tl_id)]
+    
+    def start_car_waiting(self, car_id):
+        """Record when a car starts waiting at a traffic light."""
+        if car_id not in self.car_waiting_start_times:
+            self.car_waiting_start_times[car_id] = datetime.now()
+    
+    def stop_car_waiting(self, car_id):
+        """Clear the waiting time when a car starts moving."""
+        if car_id in self.car_waiting_start_times:
+            del self.car_waiting_start_times[car_id]
+    
+    def get_car_waiting_time(self, car_id):
+        """Get how long a car has been waiting in seconds."""
+        if car_id in self.car_waiting_start_times:
+            elapsed = (datetime.now() - self.car_waiting_start_times[car_id]).total_seconds()
+            return elapsed
+        return 0
 
     # instancia novo veículo de emergência no ambiente
     # devolve referência para controlo pelo agente correspondente

@@ -57,6 +57,8 @@ class CarAgent(Agent):
                     # Remove car from environment tracking
                     if self.id in self.env.car_positions:
                         del self.env.car_positions[self.id]
+                    # Clear waiting time
+                    self.env.stop_car_waiting(self.id)
                     # Remove from cars list
                     if self.car in self.env.cars:
                         self.env.cars.remove(self.car)
@@ -76,19 +78,28 @@ class CarAgent(Agent):
             async def move(self):
                 is_tl_collided, tl_id = self.env.collision_traffic_light(self.car.sprites()[0])
 
-                # Semáforo vermelho -> carro parado
-                if is_tl_collided and self.env.get_traffic_light_status(tl_id) == LightStatus.RED:
+                # Get traffic light status
+                tl_status = self.env.get_traffic_light_status(tl_id) if is_tl_collided else None
+                
+                # Semáforo vermelho ou amarelo -> carro parado
+                should_stop = is_tl_collided and tl_status in [LightStatus.RED, LightStatus.YELLOW]
+                
+                if should_stop:
                     self.car.sprites()[0].stop_car()
                     self.car.stopped_at_tl_id = tl_id
                     self.car.stopped_at_tl_start_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     await self.set_cars_at_traffic_light(tl_id)
+                    
+                    # Start tracking waiting time for visual timer
+                    self.env.start_car_waiting(self.id)
 
                     # Track waiting time for green light request
                     if self.agent.waiting_start_time is None:
                         self.agent.waiting_start_time = datetime.now()
                     
-                    # Check if we should request green light
-                    await self.check_and_request_green(tl_id)
+                    # Check if we should request green light (only for red, not yellow)
+                    if tl_status == LightStatus.RED:
+                        await self.check_and_request_green(tl_id)
 
                     # FIPA SUBSCRIBE PROTOCOL - Subscreve ao semáforo se ainda não subscreveu
                     # Cancela subscrição anterior se mudou de semáforo
@@ -107,6 +118,9 @@ class CarAgent(Agent):
                     # Reset waiting time tracking when moving
                     self.agent.waiting_start_time = None
                     self.agent.green_request_sent = False
+                    
+                    # Stop tracking waiting time for visual timer
+                    self.env.stop_car_waiting(self.id)
 
                     if self.env.collision_sprite(self.car.sprites()[0]):
                         self.car.sprites()[0].fires_car()
