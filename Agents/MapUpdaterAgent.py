@@ -69,8 +69,8 @@ class MapUpdaterAgent(Agent):
             async def on_end(self):
                 pass  # Don't stop the agent when this ends
 
-        car_spawn_interval = 2  # Check every 2 seconds
-        start_at = datetime.now() + timedelta(seconds=5)  # Start after initial setup
+        car_spawn_interval = 1  # Check every 1 second (faster spawning)
+        start_at = datetime.now() + timedelta(seconds=3)  # Start after initial setup
         car_spawn_period = CarSpawnBehaviour(period=car_spawn_interval, start_at=start_at)
         self.add_behaviour(car_spawn_period)
 

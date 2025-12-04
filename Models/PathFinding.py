@@ -48,14 +48,14 @@ class TrafficNetwork:
         #   top_left (268, 180)    top_mid (627, 180)    top_right (992, 180)
         #   bottom_left (268, 530) bottom_mid (627, 530) bottom_right (992, 530)
         
-        # Intersection centers match road centers: X = {268, 627, 992}, Y = {178, 528}
+        # Intersection centers match road centers: X = {279, 638, 1003}, Y = {189, 539}
         self.nodes = {
-            "top_left": IntersectionNode("top_left", (268, 178)),
-            "top_mid": IntersectionNode("top_mid", (627, 178)),
-            "top_right": IntersectionNode("top_right", (992, 178)),
-            "bottom_left": IntersectionNode("bottom_left", (268, 528)),
-            "bottom_mid": IntersectionNode("bottom_mid", (627, 528)),
-            "bottom_right": IntersectionNode("bottom_right", (992, 528)),
+            "top_left": IntersectionNode("top_left", (279, 189)),
+            "top_mid": IntersectionNode("top_mid", (638, 189)),
+            "top_right": IntersectionNode("top_right", (1003, 189)),
+            "bottom_left": IntersectionNode("bottom_left", (279, 539)),
+            "bottom_mid": IntersectionNode("bottom_mid", (638, 539)),
+            "bottom_right": IntersectionNode("bottom_right", (1003, 539)),
         }
         
         # Define ALL connections between intersections (bidirectional)
@@ -89,43 +89,44 @@ class TrafficNetwork:
         # Positions are for the middle lane (straight) - actual spawn uses lane-based positioning
         # Road centers: left=268, mid=627, right=992
         # Horizontal road centers: top=178, bottom=528
-        # Road centers: X = {left: 268, mid: 627, right: 992}, Y = {top: 178, bottom: 528}
-        # Middle lane offset from center = 30 pixels (matching LANE_OFFSETS["straight"])
+        # Road centers: X = {left: 279, mid: 638, right: 1003}, Y = {top: 189, bottom: 539}
+        # Middle lane offset from center = 35 pixels (matching RoadMap.LANE_OFFSETS["straight"])
+        # These positions are for routing purposes - actual spawn positions use RoadMap
         
         self.entry_points = {
-            # Bottom entry points (going UP, angle=0) - right side of road (center + 30)
-            "south_left": ((298, 780), 0, "bottom_left"),    # 268 + 30
-            "south_mid": ((657, 780), 0, "bottom_mid"),      # 627 + 30
-            "south_right": ((1022, 780), 0, "bottom_right"), # 992 + 30
-            # Top entry points (going DOWN, angle=180) - left side of road (center - 30)
-            "north_left": ((238, -50), 180, "top_left"),     # 268 - 30
-            "north_mid": ((597, -50), 180, "top_mid"),       # 627 - 30
-            "north_right": ((962, -50), 180, "top_right"),   # 992 - 30
-            # Left entry points (going RIGHT, angle=-90) - bottom side of road (center + 30)
-            "west_top": ((-50, 208), -90, "top_left"),       # 178 + 30
-            "west_bottom": ((-50, 558), -90, "bottom_left"), # 528 + 30
-            # Right entry points (going LEFT, angle=90) - top side of road (center - 30)
-            "east_top": ((1340, 148), 90, "top_right"),      # 178 - 30
-            "east_bottom": ((1340, 498), 90, "bottom_right"),# 528 - 30
+            # Bottom entry points (going UP, angle=0) - right side of road (center + 35)
+            "south_left": ((314, 780), 0, "bottom_left"),    # 279 + 35
+            "south_mid": ((673, 780), 0, "bottom_mid"),      # 638 + 35
+            "south_right": ((1038, 780), 0, "bottom_right"), # 1003 + 35
+            # Top entry points (going DOWN, angle=180) - left side of road (center - 35)
+            "north_left": ((244, -50), 180, "top_left"),     # 279 - 35
+            "north_mid": ((603, -50), 180, "top_mid"),       # 638 - 35
+            "north_right": ((968, -50), 180, "top_right"),   # 1003 - 35
+            # Left entry points (going RIGHT, angle=-90) - bottom side of road (center + 35)
+            "west_top": ((-50, 224), -90, "top_left"),       # 189 + 35
+            "west_bottom": ((-50, 574), -90, "bottom_left"), # 539 + 35
+            # Right entry points (going LEFT, angle=90) - top side of road (center - 35)
+            "east_top": ((1340, 154), 90, "top_right"),      # 189 - 35
+            "east_bottom": ((1340, 504), 90, "bottom_right"),# 539 - 35
         }
         
         # Define exit points (where cars leave the map)
         # Exit positions are in the correct lane for that direction
         self.exit_points = {
-            # Top exits (cars going UP exit north) - right side (center + 30)
-            "north_left_exit": ((298, -50), 0, "top_left"),
-            "north_mid_exit": ((657, -50), 0, "top_mid"),
-            "north_right_exit": ((1022, -50), 0, "top_right"),
-            # Bottom exits (cars going DOWN exit south) - left side (center - 30)
-            "south_left_exit": ((238, 780), 180, "bottom_left"),
-            "south_mid_exit": ((597, 780), 180, "bottom_mid"),
-            "south_right_exit": ((962, 780), 180, "bottom_right"),
-            # Left exits (cars going LEFT exit west) - top side (center - 30)
-            "west_top_exit": ((-50, 148), 90, "top_left"),
-            "west_bottom_exit": ((-50, 498), 90, "bottom_left"),
-            # Right exits (cars going RIGHT exit east) - bottom side (center + 30)
-            "east_top_exit": ((1340, 208), -90, "top_right"),
-            "east_bottom_exit": ((1340, 558), -90, "bottom_right"),
+            # Top exits (cars going UP exit north) - right side (center + 35)
+            "north_left_exit": ((314, -50), 0, "top_left"),
+            "north_mid_exit": ((673, -50), 0, "top_mid"),
+            "north_right_exit": ((1038, -50), 0, "top_right"),
+            # Bottom exits (cars going DOWN exit south) - left side (center - 35)
+            "south_left_exit": ((244, 780), 180, "bottom_left"),
+            "south_mid_exit": ((603, 780), 180, "bottom_mid"),
+            "south_right_exit": ((968, 780), 180, "bottom_right"),
+            # Left exits (cars going LEFT exit west) - top side (center - 35)
+            "west_top_exit": ((-50, 154), 90, "top_left"),
+            "west_bottom_exit": ((-50, 504), 90, "bottom_left"),
+            # Right exits (cars going RIGHT exit east) - bottom side (center + 35)
+            "east_top_exit": ((1340, 224), -90, "top_right"),
+            "east_bottom_exit": ((1340, 574), -90, "bottom_right"),
         }
     
     def get_nearest_node(self, position: Tuple[int, int]) -> Optional[IntersectionNode]:

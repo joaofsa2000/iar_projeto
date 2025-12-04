@@ -9,8 +9,8 @@ import random
 import pygame
 from Models.Directions import Directions
 from Map.Car import (Car, get_lane_position, _get_first_turn_for_route, 
-                     _get_road_section, _get_angle_for_entry, _calculate_turn_direction,
-                     LANE_OFFSETS, ROAD_CENTERS_X, ROAD_CENTERS_Y)
+                     _get_road_section, _get_angle_for_entry, _calculate_turn_direction)
+from Map.RoadMap import get_road_map
 from Models.PathFinding import get_traffic_network, get_pathfinder, get_random_destination
 
 AMBULANCE = ['Map/Resources/Cars/ambulancia-1.png', 'Map/Resources/Cars/ambulancia-2.png']
@@ -24,7 +24,11 @@ ENTRY_POINTS = ["south_left", "south_mid", "south_right",
 
 
 class EmergencyCar(pygame.sprite.Sprite):
-    """Emergency vehicle that follows the same paths as regular cars but with priority."""
+    """Emergency vehicle that follows the same paths as regular cars but with priority.
+    Emergency vehicles are 50% faster than normal cars.
+    """
+    # Emergency vehicles are 50% faster than normal cars
+    EMERGENCY_SPEED_MULTIPLIER = 1.50
     
     def __init__(self, screen, id):
         super().__init__()
@@ -35,7 +39,7 @@ class EmergencyCar(pygame.sprite.Sprite):
 
         self.id = id
         self.screen = screen
-        self.base_speed = 2  # Same speed as regular cars for correct turning
+        self.base_speed = 1  # Base speed (multiplied by EMERGENCY_SPEED_MULTIPLIER for movement)
         self.car_speed = 0
         
         # A* Pathfinding
@@ -78,12 +82,12 @@ class EmergencyCar(pygame.sprite.Sprite):
         self.stopped_at_tl_id = False
         self.stopped_at_tl_start_time = False
 
-        # Load sprite
+        # Load sprite - use center for accurate lane positioning
         self.image = pygame.image.load(self.car_type[self.get_next_animation_index()]).convert_alpha()
-        self.rect = self.image.get_rect(midtop=spawn_pos)
+        self.rect = self.image.get_rect(center=spawn_pos)
         
         # Start moving
-        self.fires_car(speed=2)
+        self.fires_car(speed=1)
 
     def _calculate_route(self):
         """Calculate route using A* algorithm - same as Car."""
@@ -100,10 +104,11 @@ class EmergencyCar(pygame.sprite.Sprite):
         return self.pathfinder.find_path(start_node, end_node) or []
 
     def _get_time_multiplier(self):
-        """Get time multiplier - same as Car."""
+        """Get time multiplier - includes 50% speed bonus for emergency vehicles."""
         if Car.is_paused:
             return 0
-        return min(Car.time_speed, 10)
+        # Emergency vehicles are 50% faster than normal cars
+        return min(Car.time_speed, 10) * self.EMERGENCY_SPEED_MULTIPLIER
 
     def _update_next_turn(self):
         """Update next turn direction based on route - uses same logic as Car."""
@@ -151,8 +156,8 @@ class EmergencyCar(pygame.sprite.Sprite):
         return (self.rect.x < -100 or self.rect.x > 1400 or 
                 self.rect.y > 850 or self.rect.y < -100)
 
-    def fires_car(self, speed=2):
-        """Start moving - same as Car."""
+    def fires_car(self, speed=1):
+        """Start moving - same as Car but 50% faster due to EMERGENCY_SPEED_MULTIPLIER."""
         self.is_car_stopped = False
         self.base_speed = speed
         self.car_speed = speed * self._get_time_multiplier()
@@ -201,29 +206,64 @@ class EmergencyCar(pygame.sprite.Sprite):
     def ending_turning(self):
         """End turning - same as Car."""
         self.is_turning = (False, '')
-        # Snap to target position calculated at turn start
-        if hasattr(self, 'turn_target_pos') and self.turn_target_pos is not None:
-            if self.turn_target_pos[0] is not None:
-                self.rect.centerx = self.turn_target_pos[0]
-            if self.turn_target_pos[1] is not None:
-                self.rect.centery = self.turn_target_pos[1]
-            self.turn_target_pos = None
+        # Target position was gradually applied during turn - just clean up
+        self.turn_target_pos = None
+        self.turn_start_pos = None
+        self.rotation_start_pos = None
     
     def _calculate_turn_target(self):
-        """Calculate where the car should end up after completing the turn."""
+        """Calculate where the car should end up after completing the turn.
+        Uses the RoadMap for accurate lane positions."""
+        road_map = get_road_map()
+        
+        # Save starting position for smooth interpolation
+        self.turn_start_pos = (self.rect.centerx, self.rect.centery)
+        
         future_turn = self._peek_turn_after_current()
+        current_turn = self.is_turning[1] if self.is_turning[0] else self.next_turn_direction
         
-        if future_turn == Directions.LEFT:
-            target_offset = LANE_OFFSETS["left_turn"]
-        elif future_turn == Directions.RIGHT:
-            target_offset = LANE_OFFSETS["right_turn"]
-        else:
-            target_offset = LANE_OFFSETS["straight"]
+        # Use RoadMap to get the target position
+        target_x, target_y = road_map.get_target_lane_after_turn(
+            self.angle, 
+            current_turn, 
+            future_turn,
+            (self.rect.centerx, self.rect.centery)
+        )
         
+        self.turn_target_pos = (target_x, target_y)
+    
+    def _interpolate_to_target_lane(self):
+        """Gradually move towards the target lane position during rotation."""
+        if not hasattr(self, 'turn_target_pos') or self.turn_target_pos is None:
+            return
+        if not hasattr(self, 'rotation_start_pos') or self.rotation_start_pos is None:
+            return
+        
+        # Calculate interpolation progress (0 to 1) based on rotation done
+        progress = min(1.0, self.turning_rotation_done / 90.0)
+        
+        # Apply easing for smoother motion (ease-out for more natural arc)
+        progress = 1 - (1 - progress) * (1 - progress)
+        
+        target_x, target_y = self.turn_target_pos
+        start_x, start_y = self.rotation_start_pos
+        
+        # Interpolate position
+        if target_x is not None and start_x is not None:
+            self.rect.centerx = int(start_x + (target_x - start_x) * progress)
+        if target_y is not None and start_y is not None:
+            self.rect.centery = int(start_y + (target_y - start_y) * progress)
+    
+    def _peek_turn_after_current(self):
+        """Look ahead to see what turn direction is needed AT the NEXT intersection.
+        
+        If we're at intersection A going to B, we need to know what turn to make at B to go to C.
+        This determines which lane to be in when we arrive at B.
+        """
+        next_index = self.current_route_index + 1
+        
+        # Calculate the angle we'll have after completing the current turn
         angle_norm = self.angle % 360
-        if angle_norm < 0:
-            angle_norm += 360
-        
         current_turn = self.is_turning[1] if self.is_turning[0] else self.next_turn_direction
         if current_turn == Directions.LEFT:
             new_angle = (angle_norm + 90) % 360
@@ -232,68 +272,26 @@ class EmergencyCar(pygame.sprite.Sprite):
         else:
             new_angle = angle_norm
         
-        target_x = None
-        target_y = None
-        
-        if 315 <= new_angle or new_angle < 45:
-            road_centers = [ROAD_CENTERS_X["left"], ROAD_CENTERS_X["mid"], ROAD_CENTERS_X["right"]]
-            nearest_center = min(road_centers, key=lambda c: abs(c - self.rect.centerx))
-            target_x = nearest_center + target_offset
-            
-        elif 135 <= new_angle < 225:
-            road_centers = [ROAD_CENTERS_X["left"], ROAD_CENTERS_X["mid"], ROAD_CENTERS_X["right"]]
-            nearest_center = min(road_centers, key=lambda c: abs(c - self.rect.centerx))
-            target_x = nearest_center - target_offset
-            
-        elif 45 <= new_angle < 135:
-            road_centers = [ROAD_CENTERS_Y["top"], ROAD_CENTERS_Y["bottom"]]
-            nearest_center = min(road_centers, key=lambda c: abs(c - self.rect.centery))
-            target_y = nearest_center - target_offset
-            
-        elif 225 <= new_angle < 315:
-            road_centers = [ROAD_CENTERS_Y["top"], ROAD_CENTERS_Y["bottom"]]
-            nearest_center = min(road_centers, key=lambda c: abs(c - self.rect.centery))
-            target_y = nearest_center + target_offset
-        
-        self.turn_target_pos = (target_x, target_y)
-    
-    def _peek_turn_after_current(self):
-        """Look ahead to see what turn direction is needed after this intersection."""
-        future_index = self.current_route_index + 1
-        
-        if not self.route or future_index >= len(self.route):
-            if self.route and future_index - 1 < len(self.route):
-                last_node = self.route[future_index - 1] if future_index - 1 >= 0 else None
-                if last_node:
-                    angle_norm = self.angle % 360
-                    current_turn = self.is_turning[1] if self.is_turning[0] else self.next_turn_direction
-                    if current_turn == Directions.LEFT:
-                        new_angle = angle_norm + 90
-                    elif current_turn == Directions.RIGHT:
-                        new_angle = angle_norm - 90
-                    else:
-                        new_angle = angle_norm
-                    
-                    return _calculate_turn_direction(
-                        last_node, self.destination, new_angle, self.network, is_exit=True
-                    )
+        if not self.route:
             return Directions.FORWARD
         
-        current_node = self.route[future_index - 1] if future_index > 0 and future_index - 1 < len(self.route) else None
-        next_node = self.route[future_index] if future_index < len(self.route) else None
+        # If next_index is beyond the route, we're heading to the exit from the last intersection
+        if next_index >= len(self.route):
+            return Directions.FORWARD
         
-        if current_node and next_node:
-            angle_norm = self.angle % 360
-            current_turn = self.is_turning[1] if self.is_turning[0] else self.next_turn_direction
-            if current_turn == Directions.LEFT:
-                new_angle = angle_norm + 90
-            elif current_turn == Directions.RIGHT:
-                new_angle = angle_norm - 90
-            else:
-                new_angle = angle_norm
-            
+        # If next_index is at the last position in route, turn at that intersection leads to exit
+        if next_index == len(self.route) - 1:
+            next_intersection = self.route[next_index]
             return _calculate_turn_direction(
-                current_node, next_node, new_angle, self.network, is_exit=False
+                next_intersection, self.destination, new_angle, self.network, is_exit=True
+            )
+        
+        # Otherwise, calculate turn at next_index intersection to reach next_index + 1
+        if next_index < len(self.route) - 1:
+            intersection_at = self.route[next_index]
+            going_to = self.route[next_index + 1]
+            return _calculate_turn_direction(
+                intersection_at, going_to, new_angle, self.network, is_exit=False
             )
         
         return Directions.FORWARD
@@ -316,60 +314,72 @@ class EmergencyCar(pygame.sprite.Sprite):
             self.turn_left()
 
     def turn_left(self):
-        """Turn left - EXACTLY the same as Car."""
+        """Turn left - with smooth lane interpolation."""
         time_mult = self._get_time_multiplier()
         
-        if self.turning_ticks < 58:
+        # Phase 1: Move forward into intersection (longer for left turns)
+        if self.turning_ticks < 70:
             self.go_forward()
             return
 
-        if 58 <= self.turning_ticks < 60:
+        # Phase 2: Brief pause before rotation
+        if 70 <= self.turning_ticks < 72:
             self.stop_car()
+            if not hasattr(self, 'rotation_start_pos') or self.rotation_start_pos is None:
+                self.rotation_start_pos = (self.rect.centerx, self.rect.centery)
             return
 
+        # Phase 3: Rotation with lane interpolation
         if self.turning_rotation_done < 90:
-            rotation_step = min(6 * time_mult, 90 - self.turning_rotation_done)
+            rotation_step = min(4 * time_mult, 90 - self.turning_rotation_done)
             self.angle += rotation_step
             self.turning_rotation_done += rotation_step
-            self.fires_car()
-            self.go_forward()
-            self.stop_car()
+            
+            self._interpolate_to_target_lane()
             self.draw()
 
+        # Phase 4: Complete turn
         if self.turning_rotation_done >= 90:
             self.ending_turning()
             self.fires_car()
             self.go_forward()
             self.turning_rotation_done = 0
             self.turning_ticks = 0
+            self.rotation_start_pos = None
 
     def turn_right(self):
-        """Turn right - EXACTLY the same as Car."""
+        """Turn right - with smooth lane interpolation."""
         time_mult = self._get_time_multiplier()
         
-        if self.turning_ticks < 25:
+        # Phase 1: Move forward into intersection (shorter for right turns)
+        if self.turning_ticks < 35:
             self.go_forward()
             return
 
-        if 25 <= self.turning_ticks < 27:
+        # Phase 2: Brief pause before rotation
+        if 35 <= self.turning_ticks < 37:
             self.stop_car()
+            if not hasattr(self, 'rotation_start_pos') or self.rotation_start_pos is None:
+                self.rotation_start_pos = (self.rect.centerx, self.rect.centery)
             return
 
+        # Phase 3: Rotation with lane interpolation
         if self.turning_rotation_done < 90:
-            rotation_step = min(6 * time_mult, 90 - self.turning_rotation_done)
+            rotation_step = min(5 * time_mult, 90 - self.turning_rotation_done)
             self.angle -= rotation_step
             self.turning_rotation_done += rotation_step
-            self.fires_car()
-            self.go_forward()
-            self.stop_car()
+            
+            self._interpolate_to_target_lane()
             self.draw()
 
+        # Phase 4: Complete turn
         if self.turning_rotation_done >= 90:
             self.ending_turning()
             self.fires_car()
             self.go_forward()
             self.turning_rotation_done = 0
             self.turning_ticks = 0
+            self.rotation_start_pos = None
 
     def draw(self):
         """Draw the sprite - with siren animation."""

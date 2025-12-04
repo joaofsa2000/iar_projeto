@@ -29,7 +29,7 @@ async def main():
 
     # Cria e inicia o agente central (MapUpdater)
     print("[SETUP] Iniciando agente central (MapUpdater)...")
-    num_initial_cars = 15  # Número de carros iniciais
+    num_initial_cars = 30  # Número de carros iniciais (aumentado)
     map_updater = MapUpdaterAgent("central@localhost", "pass", environment, initial_car_count=num_initial_cars)
     await map_updater.start(auto_register=True)
     
