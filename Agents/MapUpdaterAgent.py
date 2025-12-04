@@ -3,22 +3,25 @@ from datetime import datetime, timedelta
 import random
 import time
 import uuid
-import joblib
-import pandas as pd
 
 from spade.agent import Agent
-from spade.behaviour import PeriodicBehaviour, CyclicBehaviour
+from spade.behaviour import PeriodicBehaviour, CyclicBehaviour, OneShotBehaviour
 from spade.message import Message
 from spade.template import Template
 
 from Agents.EmergencyCarAgent import EmergencyCarAgent
+from Agents.CarAgent import CarAgent
 
 
 class MapUpdaterAgent(Agent):
-    def __init__(self, jid, password, environment):
+    def __init__(self, jid, password, environment, initial_car_count=15):
         super().__init__(jid, password)
         self.environment = environment
         self.id = jid
+        
+        # Counter for spawning new cars with unique IDs
+        self.next_car_id = initial_car_count  # Start after initial cars
+        self.next_emergency_id = 1
         
         # List of all registered agent JIDs for broadcasting
         self.registered_agents = []
@@ -48,17 +51,46 @@ class MapUpdaterAgent(Agent):
         period = MapUpdateBehaviour(period=0, start_at=start_at)
         self.add_behaviour(period)
 
-        # Comportamento periódico (10s) para criar um veículo de emergência
-        class EmergencySpawnBehaviour(PeriodicBehaviour):
+        # Comportamento periódico (2s) para criar carros normais baseado na densidade de tráfego
+        class CarSpawnBehaviour(PeriodicBehaviour):
             async def run(self):
-                print(f"[MAP UPDATER {self.agent.jid}] Criando veículo de emergência")
-                emergency_car = EmergencyCarAgent("emergencia_carro_1@localhost", "pass", self.agent.environment)
-                await emergency_car.start(auto_register=True)
+                # Check if we should spawn a new car based on traffic density
+                if self.agent.environment.should_spawn_car():
+                    car_id = self.agent.next_car_id
+                    self.agent.next_car_id += 1
+                    
+                    try:
+                        new_car = CarAgent(f"carro_{car_id}@localhost", "pass", self.agent.environment)
+                        await new_car.start(auto_register=True)
+                        print(f"[MAP UPDATER] Novo carro spawned: carro_{car_id}")
+                    except Exception as e:
+                        print(f"[MAP UPDATER] Erro ao criar carro: {e}")
 
             async def on_end(self):
-                await self.agent.stop()
+                pass  # Don't stop the agent when this ends
 
-        emergency_interval = 10
+        car_spawn_interval = 2  # Check every 2 seconds
+        start_at = datetime.now() + timedelta(seconds=5)  # Start after initial setup
+        car_spawn_period = CarSpawnBehaviour(period=car_spawn_interval, start_at=start_at)
+        self.add_behaviour(car_spawn_period)
+
+        # Comportamento periódico (15s) para criar um veículo de emergência
+        class EmergencySpawnBehaviour(PeriodicBehaviour):
+            async def run(self):
+                emergency_id = self.agent.next_emergency_id
+                self.agent.next_emergency_id += 1
+                
+                print(f"[MAP UPDATER {self.agent.jid}] Criando veículo de emergência #{emergency_id}")
+                try:
+                    emergency_car = EmergencyCarAgent(f"emergencia_carro_{emergency_id}@localhost", "pass", self.agent.environment)
+                    await emergency_car.start(auto_register=True)
+                except Exception as e:
+                    print(f"[MAP UPDATER] Erro ao criar veículo emergência: {e}")
+
+            async def on_end(self):
+                pass  # Don't stop the agent when this ends
+
+        emergency_interval = 15  # Every 15 seconds
         start_at = datetime.now() + timedelta(seconds=emergency_interval)
         period = EmergencySpawnBehaviour(period=emergency_interval, start_at=start_at)
         self.add_behaviour(period)
@@ -103,7 +135,7 @@ class MapUpdaterAgent(Agent):
                     await self.request_traffic_adjustment(max_cross, vehicle_count)
                     
                     # Broadcast alert to all agents
-                    await self.agent.broadcast_alert(f"CONGESTION_ALERT: High traffic at {max_cross} ({vehicle_count} vehicles)")
+                    await self.broadcast_alert(f"CONGESTION_ALERT: High traffic at {max_cross} ({vehicle_count} vehicles)")
 
             async def request_traffic_adjustment(self, crossing, vehicle_count):
                 """Envia pedido aos semáforos para ajustar ciclos (FIPA Request Protocol)"""
@@ -132,6 +164,19 @@ class MapUpdaterAgent(Agent):
 
                 await self.send(msg)
                 print(f"[MAP UPDATER {self.agent.jid}] REQUEST enviado para {tl_jid} (conv-id: {conv_id})")
+
+            async def broadcast_alert(self, alert_message: str):
+                """Broadcast an alert message to all traffic light agents."""
+                conv_id = str(uuid.uuid4())
+                
+                for tl_jid in self.agent.traffic_light_jids:
+                    msg = Message(to=tl_jid)
+                    msg.set_metadata("performative", "inform")
+                    msg.set_metadata("protocol", "fipa-inform")
+                    msg.set_metadata("conversation-id", conv_id)
+                    msg.body = alert_message
+                    
+                    await self.send(msg)
 
             async def on_end(self):
                 await self.agent.stop()
@@ -195,51 +240,22 @@ class MapUpdaterAgent(Agent):
                 print(f"[MAP UPDATER {self.agent.jid}] Broadcasting: {alert_msg}")
 
                 # Broadcast to all traffic light agents
-                await self.agent.broadcast_alert(alert_msg)
+                await self.broadcast_to_traffic_lights(alert_msg)
+
+            async def broadcast_to_traffic_lights(self, alert_message: str):
+                """Broadcast an alert message to all traffic light agents."""
+                conv_id = str(uuid.uuid4())
+                
+                for tl_jid in self.agent.traffic_light_jids:
+                    msg = Message(to=tl_jid)
+                    msg.set_metadata("performative", "inform")
+                    msg.set_metadata("protocol", "fipa-inform")
+                    msg.set_metadata("conversation-id", conv_id)
+                    msg.body = alert_message
+                    
+                    await self.send(msg)
 
         # Activate broadcast behavior every 30 seconds
         broadcast_interval = 30
         start_at = datetime.now() + timedelta(seconds=broadcast_interval)
         self.add_behaviour(BroadcastAlertBehaviour(period=broadcast_interval, start_at=start_at))
-
-    async def broadcast_alert(self, alert_message: str):
-        """
-        Broadcast an alert message to all traffic light agents using FIPA Inform Protocol.
-        
-        Args:
-            alert_message: The alert message to broadcast
-        """
-        conv_id = str(uuid.uuid4())
-        
-        for tl_jid in self.traffic_light_jids:
-            msg = Message(to=tl_jid)
-            msg.set_metadata("performative", "inform")
-            msg.set_metadata("protocol", "fipa-inform")
-            msg.set_metadata("conversation-id", conv_id)
-            msg.body = alert_message
-            
-            await self.send(msg)
-        
-        # Also broadcast to any registered car agents
-        for car_jid in list(self.environment.car_positions.keys()):
-            try:
-                msg = Message(to=car_jid)
-                msg.set_metadata("performative", "inform")
-                msg.set_metadata("protocol", "fipa-inform")
-                msg.set_metadata("conversation-id", conv_id)
-                msg.body = alert_message
-                
-                await self.send(msg)
-            except Exception as e:
-                # Car may have left the simulation
-                pass
-
-    async def broadcast_to_all_agents(self, message: str, protocol: str = "fipa-inform"):
-        """
-        Send a message to all known agents in the system.
-        
-        Args:
-            message: The message content to send
-            protocol: The FIPA protocol to use (default: fipa-inform)
-        """
-        await self.broadcast_alert(message)

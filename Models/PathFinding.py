@@ -6,6 +6,7 @@ Defines the intersection graph and calculates optimal routes.
 
 import heapq
 import math
+import random
 from enum import Enum
 from typing import Dict, List, Tuple, Optional
 
@@ -36,8 +37,8 @@ class TrafficNetwork:
     
     def __init__(self):
         self.nodes: Dict[str, IntersectionNode] = {}
-        self.entry_points: Dict[str, Tuple[Tuple[int, int], int, str]] = {}  # {entry_id: (position, angle, nearest_node)}
-        self.exit_points: Dict[str, Tuple[Tuple[int, int], int, str]] = {}  # {exit_id: (position, angle, nearest_node)}
+        self.entry_points: Dict[str, Tuple[Tuple[int, int], int, str]] = {}
+        self.exit_points: Dict[str, Tuple[Tuple[int, int], int, str]] = {}
         self._build_network()
     
     def _build_network(self):
@@ -47,74 +48,84 @@ class TrafficNetwork:
         #   top_left (268, 180)    top_mid (627, 180)    top_right (992, 180)
         #   bottom_left (268, 530) bottom_mid (627, 530) bottom_right (992, 530)
         
+        # Intersection centers match road centers: X = {268, 627, 992}, Y = {178, 528}
         self.nodes = {
-            "top_left": IntersectionNode("top_left", (268, 180)),
-            "top_mid": IntersectionNode("top_mid", (627, 180)),
-            "top_right": IntersectionNode("top_right", (992, 180)),
-            "bottom_left": IntersectionNode("bottom_left", (268, 530)),
-            "bottom_mid": IntersectionNode("bottom_mid", (627, 530)),
-            "bottom_right": IntersectionNode("bottom_right", (992, 530)),
+            "top_left": IntersectionNode("top_left", (268, 178)),
+            "top_mid": IntersectionNode("top_mid", (627, 178)),
+            "top_right": IntersectionNode("top_right", (992, 178)),
+            "bottom_left": IntersectionNode("bottom_left", (268, 528)),
+            "bottom_mid": IntersectionNode("bottom_mid", (627, 528)),
+            "bottom_right": IntersectionNode("bottom_right", (992, 528)),
         }
         
-        # Define connections between intersections
-        # Each connection includes the direction the car must take to reach the neighbor
+        # Define ALL connections between intersections (bidirectional)
+        # This allows cars to turn at any intersection
         
-        # Horizontal connections (left-right)
-        # Top row
-        self.nodes["top_left"].add_neighbor(self.nodes["top_mid"], "forward")  # going right
-        self.nodes["top_mid"].add_neighbor(self.nodes["top_left"], "forward")  # going left
-        self.nodes["top_mid"].add_neighbor(self.nodes["top_right"], "forward")  # going right
-        self.nodes["top_right"].add_neighbor(self.nodes["top_mid"], "forward")  # going left
+        # Horizontal connections (top row)
+        self.nodes["top_left"].add_neighbor(self.nodes["top_mid"], "right")
+        self.nodes["top_mid"].add_neighbor(self.nodes["top_left"], "left")
+        self.nodes["top_mid"].add_neighbor(self.nodes["top_right"], "right")
+        self.nodes["top_right"].add_neighbor(self.nodes["top_mid"], "left")
         
-        # Bottom row
-        self.nodes["bottom_left"].add_neighbor(self.nodes["bottom_mid"], "forward")
-        self.nodes["bottom_mid"].add_neighbor(self.nodes["bottom_left"], "forward")
-        self.nodes["bottom_mid"].add_neighbor(self.nodes["bottom_right"], "forward")
-        self.nodes["bottom_right"].add_neighbor(self.nodes["bottom_mid"], "forward")
+        # Horizontal connections (bottom row)
+        self.nodes["bottom_left"].add_neighbor(self.nodes["bottom_mid"], "right")
+        self.nodes["bottom_mid"].add_neighbor(self.nodes["bottom_left"], "left")
+        self.nodes["bottom_mid"].add_neighbor(self.nodes["bottom_right"], "right")
+        self.nodes["bottom_right"].add_neighbor(self.nodes["bottom_mid"], "left")
         
-        # Vertical connections (top-bottom)
-        self.nodes["top_left"].add_neighbor(self.nodes["bottom_left"], "forward")
-        self.nodes["bottom_left"].add_neighbor(self.nodes["top_left"], "forward")
-        self.nodes["top_mid"].add_neighbor(self.nodes["bottom_mid"], "forward")
-        self.nodes["bottom_mid"].add_neighbor(self.nodes["top_mid"], "forward")
-        self.nodes["top_right"].add_neighbor(self.nodes["bottom_right"], "forward")
-        self.nodes["bottom_right"].add_neighbor(self.nodes["top_right"], "forward")
+        # Vertical connections (left column)
+        self.nodes["top_left"].add_neighbor(self.nodes["bottom_left"], "down")
+        self.nodes["bottom_left"].add_neighbor(self.nodes["top_left"], "up")
+        
+        # Vertical connections (middle column)
+        self.nodes["top_mid"].add_neighbor(self.nodes["bottom_mid"], "down")
+        self.nodes["bottom_mid"].add_neighbor(self.nodes["top_mid"], "up")
+        
+        # Vertical connections (right column)
+        self.nodes["top_right"].add_neighbor(self.nodes["bottom_right"], "down")
+        self.nodes["bottom_right"].add_neighbor(self.nodes["top_right"], "up")
         
         # Define entry points (where cars spawn) and their nearest intersections
-        # Format: (position, angle, nearest_intersection_id)
+        # Positions are for the middle lane (straight) - actual spawn uses lane-based positioning
+        # Road centers: left=268, mid=627, right=992
+        # Horizontal road centers: top=178, bottom=528
+        # Road centers: X = {left: 268, mid: 627, right: 992}, Y = {top: 178, bottom: 528}
+        # Middle lane offset from center = 30 pixels (matching LANE_OFFSETS["straight"])
+        
         self.entry_points = {
-            # Bottom entry points (going up, angle=0)
-            "south_left": ((310, 780), 0, "bottom_left"),
-            "south_mid": ((669, 780), 0, "bottom_mid"),
-            "south_right": ((1034, 780), 0, "bottom_right"),
-            # Top entry points (going down, angle=180)
-            "north_left": ((244, -50), 180, "top_left"),
-            "north_mid": ((603, -50), 180, "top_mid"),
-            "north_right": ((969, -50), 180, "top_right"),
-            # Left entry points (going right, angle=-90)
-            "west_top": ((-50, 201), -90, "top_left"),
-            "west_bottom": ((-50, 552), -90, "bottom_left"),
-            # Right entry points (going left, angle=90)
-            "east_top": ((1340, 135), 90, "top_right"),
-            "east_bottom": ((1340, 486), 90, "bottom_right"),
+            # Bottom entry points (going UP, angle=0) - right side of road (center + 30)
+            "south_left": ((298, 780), 0, "bottom_left"),    # 268 + 30
+            "south_mid": ((657, 780), 0, "bottom_mid"),      # 627 + 30
+            "south_right": ((1022, 780), 0, "bottom_right"), # 992 + 30
+            # Top entry points (going DOWN, angle=180) - left side of road (center - 30)
+            "north_left": ((238, -50), 180, "top_left"),     # 268 - 30
+            "north_mid": ((597, -50), 180, "top_mid"),       # 627 - 30
+            "north_right": ((962, -50), 180, "top_right"),   # 992 - 30
+            # Left entry points (going RIGHT, angle=-90) - bottom side of road (center + 30)
+            "west_top": ((-50, 208), -90, "top_left"),       # 178 + 30
+            "west_bottom": ((-50, 558), -90, "bottom_left"), # 528 + 30
+            # Right entry points (going LEFT, angle=90) - top side of road (center - 30)
+            "east_top": ((1340, 148), 90, "top_right"),      # 178 - 30
+            "east_bottom": ((1340, 498), 90, "bottom_right"),# 528 - 30
         }
         
         # Define exit points (where cars leave the map)
+        # Exit positions are in the correct lane for that direction
         self.exit_points = {
-            # Top exits (cars leaving northward)
-            "north_left_exit": ((268, -50), 0, "top_left"),
-            "north_mid_exit": ((627, -50), 0, "top_mid"),
-            "north_right_exit": ((992, -50), 0, "top_right"),
-            # Bottom exits (cars leaving southward)
-            "south_left_exit": ((268, 780), 180, "bottom_left"),
-            "south_mid_exit": ((627, 780), 180, "bottom_mid"),
-            "south_right_exit": ((992, 780), 180, "bottom_right"),
-            # Left exits (cars leaving westward)
-            "west_top_exit": ((-50, 180), 90, "top_left"),
-            "west_bottom_exit": ((-50, 530), 90, "bottom_left"),
-            # Right exits (cars leaving eastward)
-            "east_top_exit": ((1340, 180), -90, "top_right"),
-            "east_bottom_exit": ((1340, 530), -90, "bottom_right"),
+            # Top exits (cars going UP exit north) - right side (center + 30)
+            "north_left_exit": ((298, -50), 0, "top_left"),
+            "north_mid_exit": ((657, -50), 0, "top_mid"),
+            "north_right_exit": ((1022, -50), 0, "top_right"),
+            # Bottom exits (cars going DOWN exit south) - left side (center - 30)
+            "south_left_exit": ((238, 780), 180, "bottom_left"),
+            "south_mid_exit": ((597, 780), 180, "bottom_mid"),
+            "south_right_exit": ((962, 780), 180, "bottom_right"),
+            # Left exits (cars going LEFT exit west) - top side (center - 30)
+            "west_top_exit": ((-50, 148), 90, "top_left"),
+            "west_bottom_exit": ((-50, 498), 90, "bottom_left"),
+            # Right exits (cars going RIGHT exit east) - bottom side (center + 30)
+            "east_top_exit": ((1340, 208), -90, "top_right"),
+            "east_bottom_exit": ((1340, 558), -90, "bottom_right"),
         }
     
     def get_nearest_node(self, position: Tuple[int, int]) -> Optional[IntersectionNode]:
@@ -148,16 +159,12 @@ class AStarPathfinder:
     def find_path(self, start_id: str, goal_id: str) -> Optional[List[str]]:
         """
         Find the optimal path from start to goal using A*.
-        
-        Args:
-            start_id: ID of the starting intersection
-            goal_id: ID of the goal intersection
-        
-        Returns:
-            List of intersection IDs representing the path, or None if no path exists
         """
         if start_id not in self.network.nodes or goal_id not in self.network.nodes:
             return None
+        
+        if start_id == goal_id:
+            return [start_id]
         
         start = self.network.nodes[start_id]
         goal = self.network.nodes[goal_id]
@@ -166,18 +173,13 @@ class AStarPathfinder:
         open_set = [(0, start_id)]
         heapq.heapify(open_set)
         
-        # Track where we came from
         came_from: Dict[str, str] = {}
-        
-        # g_score: cost from start to node
         g_score: Dict[str, float] = {node_id: float('inf') for node_id in self.network.nodes}
         g_score[start_id] = 0
         
-        # f_score: g_score + heuristic
         f_score: Dict[str, float] = {node_id: float('inf') for node_id in self.network.nodes}
         f_score[start_id] = self.network._heuristic(start, goal)
         
-        # Track nodes in open set
         open_set_hash = {start_id}
         
         while open_set:
@@ -190,7 +192,6 @@ class AStarPathfinder:
             current = self.network.nodes[current_id]
             
             for neighbor_id, neighbor in current.neighbors.items():
-                # Cost to move to neighbor (uniform cost of 1 per intersection)
                 tentative_g = g_score[current_id] + self.network._euclidean_distance(
                     current.position, neighbor.position
                 )
@@ -204,7 +205,7 @@ class AStarPathfinder:
                         heapq.heappush(open_set, (f_score[neighbor_id], neighbor_id))
                         open_set_hash.add(neighbor_id)
         
-        return None  # No path found
+        return None
     
     def _reconstruct_path(self, came_from: Dict[str, str], current: str) -> List[str]:
         """Reconstruct the path from start to goal."""
@@ -239,35 +240,37 @@ class AStarPathfinder:
         dy = next_node.position[1] - current.position[1]
         
         # Determine target angle based on direction to next node
+        # 0 = up (north), 90 = left (west), 180 = down (south), -90/270 = right (east)
         if abs(dx) > abs(dy):
             # Primarily horizontal movement
-            target_angle = -90 if dx > 0 else 90  # -90 = right, 90 = left
+            target_angle = 270 if dx > 0 else 90  # 270/-90 = right (east), 90 = left (west)
         else:
             # Primarily vertical movement
-            target_angle = 0 if dy < 0 else 180  # 0 = up, 180 = down
+            target_angle = 0 if dy < 0 else 180  # 0 = up (north), 180 = down (south)
         
-        # Normalize angles to compare
+        # Normalize current angle to 0-359
         current_normalized = current_angle % 360
-        target_normalized = target_angle % 360
         if current_normalized < 0:
             current_normalized += 360
-        if target_normalized < 0:
-            target_normalized += 360
         
         # Calculate the angle difference
-        diff = (target_normalized - current_normalized + 360) % 360
+        diff = (target_angle - current_normalized + 360) % 360
         
-        if diff == 0 or diff == 360:
+        if diff == 0:
             return "forward"
-        elif diff == 90 or diff == -270:
+        elif diff == 90:
             return "left"
-        elif diff == 270 or diff == -90:
+        elif diff == 270:
             return "right"
         elif diff == 180:
-            # U-turn needed - default to left
-            return "left"
+            # U-turn - pick randomly
+            return random.choice(["left", "right"])
         
-        return "forward"
+        # For other angles, determine closest turn
+        if diff < 180:
+            return "left"
+        else:
+            return "right"
 
 
 # Global traffic network instance
@@ -294,18 +297,10 @@ def get_pathfinder() -> AStarPathfinder:
 def calculate_route(start_entry: str, destination_exit: str) -> Optional[List[str]]:
     """
     Calculate a route from an entry point to an exit point.
-    
-    Args:
-        start_entry: Entry point ID (e.g., "south_left")
-        destination_exit: Exit point ID (e.g., "north_right_exit")
-    
-    Returns:
-        List of intersection IDs to pass through, or None if no route exists
     """
     network = get_traffic_network()
     pathfinder = get_pathfinder()
     
-    # Get the nearest intersections to entry and exit
     if start_entry in network.entry_points:
         _, _, start_node = network.entry_points[start_entry]
     else:
@@ -320,16 +315,54 @@ def calculate_route(start_entry: str, destination_exit: str) -> Optional[List[st
 
 
 def get_random_destination(entry_point: str) -> str:
-    """Get a random valid destination exit point for a given entry."""
-    import random
+    """
+    Get a random valid destination exit point for a given entry.
+    Prefers destinations that require turns (more interesting routes).
+    """
     network = get_traffic_network()
     
-    # Get all exit points that are different from the entry direction
-    entry_pos = network.entry_points.get(entry_point, ((0, 0), 0, ""))
+    if entry_point not in network.entry_points:
+        return random.choice(list(network.exit_points.keys()))
     
-    # Filter exits that make sense (not going back the same way)
-    valid_exits = list(network.exit_points.keys())
+    _, _, start_node = network.entry_points[entry_point]
     
-    return random.choice(valid_exits)
-
-
+    # Categorize exits by how many turns they require
+    straight_exits = []  # Same direction as entry
+    turn_exits = []      # Require at least one turn
+    
+    # Determine entry direction
+    entry_direction = entry_point.split("_")[0]  # south, north, west, east
+    
+    for exit_id, (_, _, exit_node) in network.exit_points.items():
+        exit_direction = exit_id.split("_")[0]  # south, north, west, east
+        
+        # Straight through: entering from south exits north, etc.
+        is_straight = (
+            (entry_direction == "south" and exit_direction == "north") or
+            (entry_direction == "north" and exit_direction == "south") or
+            (entry_direction == "west" and exit_direction == "east") or
+            (entry_direction == "east" and exit_direction == "west")
+        )
+        
+        # Don't allow U-turns (exit same direction as entry)
+        is_uturn = entry_direction == exit_direction
+        
+        if is_uturn:
+            continue  # Skip U-turn exits
+        elif is_straight:
+            # Only add straight exits if they're not in the same lane
+            if start_node != exit_node:
+                straight_exits.append(exit_id)
+        else:
+            turn_exits.append(exit_id)
+    
+    # 70% chance to pick a turn exit, 30% straight (if available)
+    if turn_exits and (not straight_exits or random.random() < 0.7):
+        return random.choice(turn_exits)
+    elif straight_exits:
+        return random.choice(straight_exits)
+    elif turn_exits:
+        return random.choice(turn_exits)
+    else:
+        # Fallback
+        return random.choice(list(network.exit_points.keys()))

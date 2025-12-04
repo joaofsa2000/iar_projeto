@@ -12,6 +12,7 @@ from spade.message import Message
 from spade.template import Template
 
 from Models.LightStatus import LightStatus
+from Data.MetricsManager import get_metrics_manager
 
 
 # Threshold in seconds before requesting green light
@@ -49,14 +50,28 @@ class CarAgent(Agent):
                 self.env = self.agent.environment
 
             async def run(self):
+                car_sprite = self.car.sprites()[0]
+                
+                # Check if car has left the map
+                if car_sprite.rect.x < -100 or car_sprite.rect.x > 1400 or car_sprite.rect.y > 850 or car_sprite.rect.y < -100:
+                    # Remove car from environment tracking
+                    if self.id in self.env.car_positions:
+                        del self.env.car_positions[self.id]
+                    # Remove from cars list
+                    if self.car in self.env.cars:
+                        self.env.cars.remove(self.car)
+                    print(f"[CARRO {self.agent.jid}] Saiu do mapa - agente parado")
+                    await self.agent.stop()
+                    return
+                
                 # Verifica colisões com outros carros
                 if not await self.is_colliding():
                     await self.move()
-                    self.env.update_car_position(self.id, self.car.sprites()[0].get_car_position())
+                    self.env.update_car_position(self.id, car_sprite.get_car_position())
                 else:
-                    self.car.sprites()[0].stop_car()
+                    car_sprite.stop_car()
 
-                self.car.sprites()[0].update()
+                car_sprite.update()
 
             async def move(self):
                 is_tl_collided, tl_id = self.env.collision_traffic_light(self.car.sprites()[0])
@@ -172,6 +187,28 @@ class CarAgent(Agent):
                 if difference:
                     self.env.cars_stopped_times.append(
                         (self.car.stopped_at_tl_id, self.car.sprites()[0].id, difference))
+                    
+                    # Record to metrics manager for ML training
+                    try:
+                        # Parse difference string to seconds
+                        time_parts = difference.split(":")
+                        wait_seconds = int(time_parts[0]) * 3600 + int(time_parts[1]) * 60 + int(time_parts[2])
+                        
+                        # Get intersection from traffic light ID
+                        tl_id = str(self.car.stopped_at_tl_id)
+                        intersection_id = "_".join(tl_id.split("_")[:2]) if "_" in tl_id else "unknown"
+                        
+                        metrics = get_metrics_manager()
+                        metrics.record_waiting_time(
+                            sim_time=self.env.simulation_time,
+                            car_id=str(self.car.sprites()[0].id),
+                            traffic_light_id=tl_id,
+                            waiting_time_seconds=wait_seconds,
+                            intersection_id=intersection_id
+                        )
+                    except Exception as e:
+                        pass  # Don't break the flow if metrics fail
+                        
                 self.car.stopped_at_tl_start_time = False
 
             def calc_time_difference(self, start_time, end_time):
@@ -190,48 +227,81 @@ class CarAgent(Agent):
                     self.env.cars_stopped_at_tl[tl_id].append(self.id)
 
             async def is_colliding(self):
+                """Check if car is about to collide with another car ahead in the SAME LANE.
+                Cars in different lanes (side by side) should NOT block each other."""
                 angle = self.car.sprites()[0].angle
+                
+                if self.id not in self.env.car_positions:
+                    return False
+                    
                 coordinates = self.env.car_positions[self.id]
 
-                limit = await self.get_value_by_angle(angle)
+                # Detection distance ahead based on direction
+                detection_distance = 50  # pixels ahead to check
+                same_lane_tolerance = 15  # STRICT - only cars in same lane
 
-                if (abs(angle / 90) % 2) == 0:
-                    value_to_check = coordinates[1] + limit
-                    static_value_to_check = coordinates[0]
-                else:
-                    value_to_check = coordinates[0] + limit
-                    static_value_to_check = coordinates[1]
+                # Normalize angle
+                angle_norm = angle % 360
+                if angle_norm < 0:
+                    angle_norm += 360
 
                 for env_car in self.env.car_positions.keys():
                     if env_car == self.id:
                         continue
 
-                    if (abs(angle / 90) % 2) == 0:
-                        other_value = self.env.car_positions[env_car][1]
-                        other_static = self.env.car_positions[env_car][0]
-                    else:
-                        other_value = self.env.car_positions[env_car][0]
-                        other_static = self.env.car_positions[env_car][1]
+                    other_pos = self.env.car_positions[env_car]
+                    
+                    # Check if other car is going in SIMILAR direction (same lane)
+                    # Get other car's angle
+                    other_angle = other_pos[2] if len(other_pos) > 2 else 0
+                    other_angle_norm = other_angle % 360
+                    if other_angle_norm < 0:
+                        other_angle_norm += 360
+                    
+                    # Calculate angle difference
+                    angle_diff = abs(angle_norm - other_angle_norm)
+                    if angle_diff > 180:
+                        angle_diff = 360 - angle_diff
+                    
+                    # Only check cars going in roughly the same direction (within 45 degrees)
+                    # Cars going opposite directions are in different lanes - allow side by side
+                    if angle_diff > 45:
+                        continue
+                    
+                    dx = other_pos[0] - coordinates[0]
+                    dy = other_pos[1] - coordinates[1]
 
-                    if (other_value - 1 <= value_to_check <= other_value + 1) and (
-                            other_static - 7 <= static_value_to_check <= other_static + 7):
-                        if hasattr(self.env.get_car_by_id(env_car), 'stopped_at_tl_id'):
-                            tl_id = self.env.get_car_by_id(env_car).stopped_at_tl_id
+                    # Check based on direction (strict same-lane detection)
+                    is_blocking = False
+                    
+                    if 315 <= angle_norm or angle_norm < 45:  # Going up (north)
+                        # Car ahead is above us (negative dy) and in same lane
+                        if -detection_distance < dy < 0 and abs(dx) < same_lane_tolerance:
+                            is_blocking = True
+                    elif 45 <= angle_norm < 135:  # Going left (west)
+                        # Car ahead is to our left (negative dx) and in same lane
+                        if -detection_distance < dx < 0 and abs(dy) < same_lane_tolerance:
+                            is_blocking = True
+                    elif 135 <= angle_norm < 225:  # Going down (south)
+                        # Car ahead is below us (positive dy) and in same lane
+                        if 0 < dy < detection_distance and abs(dx) < same_lane_tolerance:
+                            is_blocking = True
+                    elif 225 <= angle_norm < 315:  # Going right (east)
+                        # Car ahead is to our right (positive dx) and in same lane
+                        if 0 < dx < detection_distance and abs(dy) < same_lane_tolerance:
+                            is_blocking = True
+
+                    if is_blocking:
+                        # If other car is stopped at traffic light, record it
+                        other_car_obj = self.env.get_car_by_id(env_car)
+                        if other_car_obj and hasattr(other_car_obj, 'stopped_at_tl_id'):
+                            tl_id = other_car_obj.stopped_at_tl_id
                             if tl_id:
                                 self.car.stopped_at_tl_id = tl_id
                                 await self.set_cars_at_traffic_light(tl_id)
-
                         return True
 
                 return False
-
-            async def get_value_by_angle(self, angle):
-                if angle in [0, 90, 360, -270, -360]:
-                    return -38
-                elif angle in [180, 270, -90, -180]:
-                    return 38
-                else:
-                    return 0
 
         self.add_behaviour(MovementBehaviour(self))
 

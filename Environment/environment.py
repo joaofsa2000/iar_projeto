@@ -1,5 +1,7 @@
 import csv
 import random
+import os
+import ctypes
 import pygame
 from datetime import datetime, timedelta
 from collections import defaultdict
@@ -7,6 +9,12 @@ from collections import defaultdict
 from Map.Car import Car
 from Map.Crash import Crash
 from Map.EmergencyCar import EmergencyCar
+from Data.MetricsManager import get_metrics_manager
+
+# Update Car class time speed whenever environment changes it
+def _sync_car_time_speed(time_speed, is_paused):
+    """Sync the Car class time speed with environment."""
+    Car.set_time_speed(time_speed, is_paused)
 
 from Map.Intersection import Intersection
 from Map.TrafficLight import TrafficLight
@@ -23,14 +31,35 @@ CRASH_POSITIONS = {
 # Intersection IDs for metrics tracking
 INTERSECTION_IDS = ["top_left", "top_mid", "top_right", "bottom_left", "bottom_mid", "bottom_right"]
 
-# Disruption types
+# Disruption types (Portuguese labels)
 class DisruptionType:
     NONE = "none"
-    ACCIDENT = "accident"
-    CONSTRUCTION = "construction"
-    BAD_WEATHER = "bad_weather"
-    ROAD_CLOSURE = "road_closure"
-    SPECIAL_EVENT = "special_event"
+    ACCIDENT = "acidente"
+    CONSTRUCTION = "obras"
+    BAD_WEATHER = "mau_tempo"
+    ROAD_CLOSURE = "estrada_cortada"
+    SPECIAL_EVENT = "evento_especial"
+
+
+# Portuguese labels for disruption types
+DISRUPTION_LABELS_PT = {
+    DisruptionType.NONE: "Nenhuma",
+    DisruptionType.ACCIDENT: "Acidente",
+    DisruptionType.CONSTRUCTION: "Obras",
+    DisruptionType.BAD_WEATHER: "Mau Tempo",
+    DisruptionType.ROAD_CLOSURE: "Estrada Cortada",
+    DisruptionType.SPECIAL_EVENT: "Evento Especial",
+}
+
+# Portuguese intersection names
+INTERSECTION_NAMES_PT = {
+    "top_left": "Superior Esquerdo",
+    "top_mid": "Superior Central",
+    "top_right": "Superior Direito",
+    "bottom_left": "Inferior Esquerdo",
+    "bottom_mid": "Inferior Central",
+    "bottom_right": "Inferior Direito",
+}
 
 
 # Traffic density profiles for different times of day
@@ -64,16 +93,86 @@ TRAFFIC_PATTERNS = {
 
 
 class Environment:
-    def __init__(self):
-        # estabelece janela de visualização e recursos gráficos base
+    # Base resolution (original design resolution)
+    BASE_WIDTH = 1280
+    BASE_HEIGHT = 720
+    
+    def __init__(self, fullscreen=True, display_index=0):
+        """
+        Initialize the environment.
+        
+        Args:
+            fullscreen: If True, uses borderless fullscreen mode
+            display_index: Index of the display/monitor to use (0 = primary, 1 = secondary, etc.)
+        """
+        # Initialize pygame
         pygame.init()
         pygame.font.init()
-        self.screen = pygame.display.set_mode((1280, 720))
-        pygame.display.set_caption("Traffic Management System - Press F1 for Help")
-        self.bg_surf = pygame.image.load('Map/Resources/fundo.png').convert()
-        self.clock = pygame.time.Clock()
         
-        # Fonts for UI
+        # ============================================================
+        # MULTI-MONITOR SUPPORT
+        # ============================================================
+        self.display_index = display_index
+        self.available_displays = self._get_available_displays()
+        self.current_display = self._get_display_info(display_index)
+        
+        print(f"[DISPLAY] Monitores disponíveis: {len(self.available_displays)}")
+        for i, disp in enumerate(self.available_displays):
+            marker = " <-- SELECIONADO" if i == display_index else ""
+            print(f"[DISPLAY]   Monitor {i}: {disp['width']}x{disp['height']} em ({disp['x']}, {disp['y']}){marker}")
+        
+        # ============================================================
+        # DISPLAY SETUP - BORDERLESS WINDOWED (recommended for Windows 11)
+        # ============================================================
+        self.fullscreen = fullscreen
+        
+        if fullscreen:
+            # Position window on selected display
+            os.environ['SDL_VIDEO_WINDOW_POS'] = f"{self.current_display['x']},{self.current_display['y']}"
+            
+            self.screen_width = self.current_display['width']
+            self.screen_height = self.current_display['height']
+            
+            # Use NOFRAME (borderless window) instead of FULLSCREEN
+            # This works better with Windows 11's compositor (DWM)
+            self.screen = pygame.display.set_mode(
+                (self.screen_width, self.screen_height),
+                pygame.NOFRAME | pygame.DOUBLEBUF | pygame.HWSURFACE,
+                vsync=1  # Enable vsync
+            )
+        else:
+            # Windowed mode - center on selected display
+            window_x = self.current_display['x'] + (self.current_display['width'] - self.BASE_WIDTH) // 2
+            window_y = self.current_display['y'] + (self.current_display['height'] - self.BASE_HEIGHT) // 2
+            os.environ['SDL_VIDEO_WINDOW_POS'] = f"{window_x},{window_y}"
+            
+            self.screen_width = self.BASE_WIDTH
+            self.screen_height = self.BASE_HEIGHT
+            self.screen = pygame.display.set_mode(
+                (self.screen_width, self.screen_height),
+                pygame.DOUBLEBUF | pygame.RESIZABLE,
+                vsync=1
+            )
+        
+        # Calculate scaling to maintain aspect ratio
+        self._calculate_scaling()
+        
+        # Create the game surface at base resolution (all rendering happens here)
+        self.game_surface = pygame.Surface((self.BASE_WIDTH, self.BASE_HEIGHT))
+        
+        pygame.display.set_caption("Sistema de Gestão de Tráfego - Prima F1 para Ajuda")
+        
+        # Load and prepare background
+        self.bg_surf = pygame.image.load('Map/Resources/fundo.png').convert()
+        
+        # Clock for timing
+        self.clock = pygame.time.Clock()
+        self.target_fps = 0  # 0 means use vsync (no artificial limit)
+        
+        # ============================================================
+        # FONTS (scaled for display)
+        # ============================================================
+        # Base font sizes (for 720p)
         self.font_large = pygame.font.SysFont('Arial', 24, bold=True)
         self.font_medium = pygame.font.SysFont('Arial', 18)
         self.font_small = pygame.font.SysFont('Arial', 14)
@@ -108,55 +207,55 @@ class Environment:
         self.crash_location = ""
         
         # ============================================================
-        # 24-HOUR TIME SIMULATION
+        # SIMULAÇÃO TEMPORAL 24 HORAS
         # ============================================================
-        self.simulation_time = datetime(2024, 1, 1, 7, 0, 0)  # Start at 7:00 AM
-        self.time_speed_options = [0, 1, 2, 5, 10, 30, 60, 120, 300, 600]  # Speed multipliers
-        self.time_speed_index = 3  # Default: 5x speed (1 real second = 5 sim seconds)
+        self.simulation_time = datetime(2024, 1, 1, 7, 0, 0)  # Início às 7:00
+        self.time_speed_options = [0, 1, 2, 5, 10, 30, 60, 120, 300, 600]  # Multiplicadores de velocidade
+        self.time_speed_index = 3  # Predefinido: 5x velocidade
         self.time_speed = self.time_speed_options[self.time_speed_index]
         self.last_time_update = datetime.now()
         self.is_paused = False
         
         # Traffic density based on time
         self.current_traffic_density = 0.5
-        self.car_spawn_probability = 0.02  # Base probability per frame
+        self.car_spawn_probability = 0.04  # Base probability per frame (increased)
         
         # Day/night visual effects
         self.day_night_overlay_alpha = 0
         
         # ============================================================
-        # DISRUPTION MANAGEMENT
+        # GESTÃO DE PERTURBAÇÕES
         # ============================================================
-        self.show_help = False  # F1 toggles help overlay
+        self.show_help = False  # F1 alterna sobreposição de ajuda
         self.active_disruptions = {}  # {intersection_id: DisruptionType}
         self.disruption_start_times = {}  # {intersection_id: datetime}
-        self.global_disruption = DisruptionType.NONE  # Global disruption (e.g., weather)
-        self.speed_modifier = 1.0  # Speed reduction due to disruptions (1.0 = normal)
+        self.global_disruption = DisruptionType.NONE  # Perturbação global (ex: tempo)
+        self.speed_modifier = 1.0  # Redução de velocidade por perturbações (1.0 = normal)
         
         # Disruption visual indicators
         self.disruption_colors = {
-            DisruptionType.NONE: (0, 255, 0),        # Green
-            DisruptionType.ACCIDENT: (255, 0, 0),    # Red
-            DisruptionType.CONSTRUCTION: (255, 165, 0),  # Orange
-            DisruptionType.BAD_WEATHER: (100, 100, 255),  # Light Blue
-            DisruptionType.ROAD_CLOSURE: (128, 0, 128),   # Purple
-            DisruptionType.SPECIAL_EVENT: (255, 255, 0),  # Yellow
+            DisruptionType.NONE: (0, 255, 0),        # Verde
+            DisruptionType.ACCIDENT: (255, 0, 0),    # Vermelho
+            DisruptionType.CONSTRUCTION: (255, 165, 0),  # Laranja
+            DisruptionType.BAD_WEATHER: (100, 100, 255),  # Azul claro
+            DisruptionType.ROAD_CLOSURE: (128, 0, 128),   # Roxo
+            DisruptionType.SPECIAL_EVENT: (255, 255, 0),  # Amarelo
         }
         
         # Selected intersection for disruption placement
         self.selected_intersection_index = 0
         
         # ============================================================
-        # ENHANCED PERFORMANCE METRICS
+        # MÉTRICAS DE DESEMPENHO
         # ============================================================
         
-        # Vehicles passed per intersection
+        # Veículos que passaram por cruzamento
         self.vehicles_passed_per_intersection = defaultdict(int)
         
-        # Congestion levels per intersection (updated periodically)
+        # Níveis de congestionamento por cruzamento
         self.congestion_levels = defaultdict(float)
         
-        # Position tracking for speed calculation
+        # Histórico de posições para cálculo de velocidade
         self.car_position_history = defaultdict(list)  # {car_id: [(x, y, timestamp), ...]}
         self.car_speeds = defaultdict(float)  # {car_id: current_speed}
         
@@ -185,13 +284,184 @@ class Environment:
         
         # Simulation start time (real world)
         self.simulation_start_time = datetime.now()
+        
+        # FPS display
+        self.show_fps = True
+        
+        # ============================================================
+        # METRICS MANAGER - Save data for analysis and ML training
+        # ============================================================
+        self.metrics_manager = get_metrics_manager()
+        self.last_metrics_save = datetime.now()
+        self.metrics_save_interval = 5  # Save metrics every 5 seconds of real time
+        self.last_snapshot_time = datetime.now()
+
+    def _get_available_displays(self):
+        """Get information about all available displays/monitors."""
+        displays = []
+        
+        try:
+            # Try to use Windows API for accurate multi-monitor info
+            if os.name == 'nt':
+                user32 = ctypes.windll.user32
+                
+                # Callback function to enumerate monitors
+                MONITOR_ENUM_PROC = ctypes.WINFUNCTYPE(
+                    ctypes.c_int,
+                    ctypes.c_ulong,
+                    ctypes.c_ulong,
+                    ctypes.POINTER(ctypes.c_long * 4),
+                    ctypes.c_double
+                )
+                
+                monitors = []
+                
+                def callback(hMonitor, hdcMonitor, lprcMonitor, dwData):
+                    rect = lprcMonitor.contents
+                    monitors.append({
+                        'x': rect[0],
+                        'y': rect[1],
+                        'width': rect[2] - rect[0],
+                        'height': rect[3] - rect[1]
+                    })
+                    return 1
+                
+                user32.EnumDisplayMonitors(None, None, MONITOR_ENUM_PROC(callback), 0)
+                
+                # Sort by x position (left to right)
+                monitors.sort(key=lambda m: (m['x'], m['y']))
+                displays = monitors
+        except Exception as e:
+            print(f"[DISPLAY] Erro ao enumerar monitores: {e}")
+        
+        # Fallback: use pygame's display info
+        if not displays:
+            try:
+                num_displays = pygame.display.get_num_displays()
+                for i in range(num_displays):
+                    display_info = pygame.display.Info()
+                    displays.append({
+                        'x': 0 if i == 0 else displays[-1]['x'] + displays[-1]['width'],
+                        'y': 0,
+                        'width': display_info.current_w,
+                        'height': display_info.current_h
+                    })
+            except:
+                # Final fallback
+                display_info = pygame.display.Info()
+                displays.append({
+                    'x': 0,
+                    'y': 0,
+                    'width': display_info.current_w,
+                    'height': display_info.current_h
+                })
+        
+        return displays
+    
+    def _get_display_info(self, index):
+        """Get information about a specific display."""
+        if index < 0 or index >= len(self.available_displays):
+            print(f"[DISPLAY] Monitor {index} não existe, usando monitor 0")
+            index = 0
+        return self.available_displays[index]
+    
+    def switch_display(self, display_index):
+        """Switch the window to a different display."""
+        if display_index < 0 or display_index >= len(self.available_displays):
+            print(f"[DISPLAY] Monitor {display_index} não existe")
+            return
+        
+        self.display_index = display_index
+        self.current_display = self._get_display_info(display_index)
+        
+        if self.fullscreen:
+            os.environ['SDL_VIDEO_WINDOW_POS'] = f"{self.current_display['x']},{self.current_display['y']}"
+            self.screen_width = self.current_display['width']
+            self.screen_height = self.current_display['height']
+            
+            # Recreate the display
+            self.screen = pygame.display.set_mode(
+                (self.screen_width, self.screen_height),
+                pygame.NOFRAME | pygame.DOUBLEBUF | pygame.HWSURFACE,
+                vsync=1
+            )
+        else:
+            window_x = self.current_display['x'] + (self.current_display['width'] - self.BASE_WIDTH) // 2
+            window_y = self.current_display['y'] + (self.current_display['height'] - self.BASE_HEIGHT) // 2
+            os.environ['SDL_VIDEO_WINDOW_POS'] = f"{window_x},{window_y}"
+            
+            self.screen = pygame.display.set_mode(
+                (self.screen_width, self.screen_height),
+                pygame.DOUBLEBUF | pygame.RESIZABLE,
+                vsync=1
+            )
+        
+        self._calculate_scaling()
+        print(f"[DISPLAY] Mudado para monitor {display_index}")
+
+    def _calculate_scaling(self):
+        """Calculate the scale factor to fit the base resolution into the screen."""
+        # Calculate scale to fit while maintaining aspect ratio
+        scale_x = self.screen_width / self.BASE_WIDTH
+        scale_y = self.screen_height / self.BASE_HEIGHT
+        
+        # Use the smaller scale to ensure everything fits
+        self.scale = min(scale_x, scale_y)
+        
+        # Calculate the scaled dimensions
+        self.scaled_width = int(self.BASE_WIDTH * self.scale)
+        self.scaled_height = int(self.BASE_HEIGHT * self.scale)
+        
+        # Calculate offset to center the game on screen
+        self.offset_x = (self.screen_width - self.scaled_width) // 2
+        self.offset_y = (self.screen_height - self.scaled_height) // 2
+        
+        print(f"[DISPLAY] Ecrã: {self.screen_width}x{self.screen_height}")
+        print(f"[DISPLAY] Base: {self.BASE_WIDTH}x{self.BASE_HEIGHT}")
+        print(f"[DISPLAY] Escala: {self.scale:.2f}x")
+        print(f"[DISPLAY] Área de jogo: {self.scaled_width}x{self.scaled_height}")
+        print(f"[DISPLAY] Offset: ({self.offset_x}, {self.offset_y})")
+
+    def toggle_fullscreen(self):
+        """Toggle between borderless fullscreen and windowed mode."""
+        self.fullscreen = not self.fullscreen
+        
+        if self.fullscreen:
+            # Borderless windowed (recommended for Windows 11)
+            display_info = pygame.display.Info()
+            self.screen_width = display_info.current_w
+            self.screen_height = display_info.current_h
+            self.screen = pygame.display.set_mode(
+                (self.screen_width, self.screen_height),
+                pygame.NOFRAME | pygame.DOUBLEBUF | pygame.HWSURFACE,
+                vsync=1
+            )
+        else:
+            # Windowed mode with resize capability
+            self.screen_width = self.BASE_WIDTH
+            self.screen_height = self.BASE_HEIGHT
+            self.screen = pygame.display.set_mode(
+                (self.screen_width, self.screen_height),
+                pygame.DOUBLEBUF | pygame.RESIZABLE,
+                vsync=1
+            )
+        
+        self._calculate_scaling()
+        print(f"[DISPLAY] Modo: {'Ecrã Inteiro (Borderless)' if self.fullscreen else 'Janela'}")
+
+    def get_game_surface(self):
+        """Get the game surface for rendering (at base resolution)."""
+        return self.game_surface
 
     # ============================================================
-    # TIME SIMULATION METHODS
+    # MÉTODOS DE SIMULAÇÃO TEMPORAL
     # ============================================================
     
     def update_simulation_time(self):
         """Update the simulation clock based on time speed."""
+        # Sync car time speed
+        _sync_car_time_speed(self.time_speed, self.is_paused)
+        
         if self.is_paused or self.time_speed == 0:
             self.last_time_update = datetime.now()
             return
@@ -215,8 +485,8 @@ class Environment:
         hour = self.simulation_time.hour
         self.current_traffic_density = TRAFFIC_PATTERNS.get(hour, 0.5)
         
-        # Adjust spawn probability based on density
-        self.car_spawn_probability = 0.005 + (self.current_traffic_density * 0.03)
+        # Adjust spawn probability based on density - increased for more traffic
+        self.car_spawn_probability = 0.015 + (self.current_traffic_density * 0.05)
     
     def _update_day_night_effect(self):
         """Update day/night overlay alpha based on time."""
@@ -236,60 +506,60 @@ class Environment:
             self.day_night_overlay_alpha = 0
     
     def get_time_period_name(self):
-        """Get a human-readable name for the current time period."""
+        """Get a human-readable name for the current time period (Portuguese)."""
         hour = self.simulation_time.hour
         
         if 5 <= hour < 7:
-            return "Early Morning"
+            return "Madrugada"
         elif 7 <= hour < 9:
-            return "Morning Rush"
+            return "Hora de Ponta Manhã"
         elif 9 <= hour < 12:
-            return "Mid-Morning"
+            return "Meio da Manhã"
         elif 12 <= hour < 14:
-            return "Lunch Time"
+            return "Hora de Almoço"
         elif 14 <= hour < 17:
-            return "Afternoon"
+            return "Tarde"
         elif 17 <= hour < 19:
-            return "Evening Rush"
+            return "Hora de Ponta Tarde"
         elif 19 <= hour < 21:
-            return "Evening"
+            return "Fim de Tarde"
         elif 21 <= hour < 24:
-            return "Night"
+            return "Noite"
         else:  # 0-5
-            return "Late Night"
+            return "Alta Noite"
     
     def increase_time_speed(self):
         """Increase simulation speed."""
         if self.time_speed_index < len(self.time_speed_options) - 1:
             self.time_speed_index += 1
             self.time_speed = self.time_speed_options[self.time_speed_index]
-            print(f"[TIME] Speed: {self.time_speed}x")
+            print(f"[TEMPO] Velocidade: {self.time_speed}x")
     
     def decrease_time_speed(self):
         """Decrease simulation speed."""
         if self.time_speed_index > 0:
             self.time_speed_index -= 1
             self.time_speed = self.time_speed_options[self.time_speed_index]
-            print(f"[TIME] Speed: {self.time_speed}x")
+            print(f"[TEMPO] Velocidade: {self.time_speed}x")
     
     def toggle_pause(self):
         """Toggle pause state."""
         self.is_paused = not self.is_paused
-        print(f"[TIME] {'PAUSED' if self.is_paused else 'RESUMED'}")
+        print(f"[TEMPO] {'PAUSADO' if self.is_paused else 'RETOMADO'}")
     
     def set_time_speed(self, speed_index):
         """Set time speed to a specific index."""
         if 0 <= speed_index < len(self.time_speed_options):
             self.time_speed_index = speed_index
             self.time_speed = self.time_speed_options[self.time_speed_index]
-            print(f"[TIME] Speed: {self.time_speed}x")
+            print(f"[TEMPO] Velocidade: {self.time_speed}x")
     
     def set_simulation_hour(self, hour):
         """Set simulation to a specific hour."""
         self.simulation_time = self.simulation_time.replace(hour=hour, minute=0, second=0)
         self._update_traffic_density()
         self._update_day_night_effect()
-        print(f"[TIME] Set to {hour:02d}:00")
+        print(f"[TEMPO] Definido para {hour:02d}:00")
     
     def should_spawn_car(self):
         """Determine if a new car should spawn based on traffic density."""
@@ -298,18 +568,18 @@ class Environment:
         return random.random() < self.car_spawn_probability
     
     def get_traffic_level_name(self):
-        """Get traffic level as a descriptive name."""
+        """Get traffic level as a descriptive name (Portuguese)."""
         density = self.current_traffic_density
         if density < 0.2:
-            return "Very Low"
+            return "Muito Baixo"
         elif density < 0.4:
-            return "Low"
+            return "Baixo"
         elif density < 0.6:
-            return "Moderate"
+            return "Moderado"
         elif density < 0.8:
-            return "High"
+            return "Alto"
         else:
-            return "Very High"
+            return "Muito Alto"
 
     def handle_keyboard_events(self, event):
         """Handle keyboard events for disruption triggers and time controls."""
@@ -317,10 +587,28 @@ class Environment:
             # F1 - Toggle help overlay
             if event.key == pygame.K_F1:
                 self.show_help = not self.show_help
-                print(f"[ENVIRONMENT] Help overlay {'shown' if self.show_help else 'hidden'}")
+                print(f"[AMBIENTE] Painel de ajuda {'visível' if self.show_help else 'oculto'}")
+            
+            # F9 - Next display/monitor
+            elif event.key == pygame.K_F9:
+                next_display = (self.display_index + 1) % len(self.available_displays)
+                self.switch_display(next_display)
+            
+            # F10 - Previous display/monitor
+            elif event.key == pygame.K_F10:
+                prev_display = (self.display_index - 1) % len(self.available_displays)
+                self.switch_display(prev_display)
+            
+            # F11 - Toggle fullscreen
+            elif event.key == pygame.K_F11:
+                self.toggle_fullscreen()
+            
+            # F12 - Toggle FPS display
+            elif event.key == pygame.K_F12:
+                self.show_fps = not self.show_fps
             
             # ============================================================
-            # TIME CONTROLS
+            # CONTROLOS DE TEMPO
             # ============================================================
             
             # SPACE - Pause/Resume
@@ -338,17 +626,17 @@ class Environment:
             # F2 - Realtime (1x)
             elif event.key == pygame.K_F2:
                 self.set_time_speed(1)  # 1x
-                print("[TIME] Set to REALTIME (1x)")
+                print("[TEMPO] Definido para TEMPO REAL (1x)")
             
             # F3 - Fast (10x)
             elif event.key == pygame.K_F3:
                 self.set_time_speed(4)  # 10x
-                print("[TIME] Set to FAST (10x)")
+                print("[TEMPO] Definido para RÁPIDO (10x)")
             
             # F4 - Ultra fast (60x - 1 min/sec)
             elif event.key == pygame.K_F4:
                 self.set_time_speed(6)  # 60x
-                print("[TIME] Set to ULTRA FAST (60x)")
+                print("[TEMPO] Definido para ULTRA RÁPIDO (60x)")
             
             # F5-F8 - Set specific hours
             elif event.key == pygame.K_F5:
@@ -361,14 +649,15 @@ class Environment:
                 self.set_simulation_hour(18)  # Evening rush
             
             # ============================================================
-            # DISRUPTION CONTROLS
+            # CONTROLOS DE PERTURBAÇÕES
             # ============================================================
             
             # Tab - Cycle through intersections
             elif event.key == pygame.K_TAB:
                 self.selected_intersection_index = (self.selected_intersection_index + 1) % len(INTERSECTION_IDS)
                 selected = INTERSECTION_IDS[self.selected_intersection_index]
-                print(f"[ENVIRONMENT] Selected intersection: {selected}")
+                selected_pt = INTERSECTION_NAMES_PT.get(selected, selected)
+                print(f"[AMBIENTE] Cruzamento selecionado: {selected_pt}")
             
             # 1 - Trigger Accident at selected intersection
             elif event.key == pygame.K_1:
@@ -405,6 +694,8 @@ class Environment:
     def _trigger_disruption(self, disruption_type):
         """Trigger a disruption at the selected intersection."""
         intersection_id = INTERSECTION_IDS[self.selected_intersection_index]
+        intersection_pt = INTERSECTION_NAMES_PT.get(intersection_id, intersection_id)
+        disruption_pt = DISRUPTION_LABELS_PT.get(disruption_type, disruption_type)
         
         # If same disruption already active, remove it
         if self.active_disruptions.get(intersection_id) == disruption_type:
@@ -421,22 +712,45 @@ class Environment:
         # Update speed modifier based on disruptions
         self._update_speed_modifier()
         
-        print(f"[DISRUPTION] {disruption_type.upper()} triggered at {intersection_id}")
+        # Record disruption to metrics
+        self.metrics_manager.record_disruption(
+            sim_time=self.simulation_time,
+            disruption_type=disruption_type,
+            intersection_id=intersection_id,
+            is_global=False,
+            duration_seconds=0,  # Will be calculated when cleared
+            speed_modifier=self.speed_modifier
+        )
+        
+        print(f"[PERTURBAÇÃO] {disruption_pt.upper()} ativado em {intersection_pt}")
 
     def _toggle_global_disruption(self, disruption_type):
         """Toggle a global disruption (affects entire map)."""
+        disruption_pt = DISRUPTION_LABELS_PT.get(disruption_type, disruption_type)
+        
         if self.global_disruption == disruption_type:
             self.global_disruption = DisruptionType.NONE
-            print(f"[DISRUPTION] {disruption_type.upper()} cleared (global)")
+            print(f"[PERTURBAÇÃO] {disruption_pt.upper()} desativado (global)")
         else:
             self.global_disruption = disruption_type
-            print(f"[DISRUPTION] {disruption_type.upper()} activated (global)")
+            print(f"[PERTURBAÇÃO] {disruption_pt.upper()} ativado (global)")
+            
+            # Record global disruption to metrics
+            self.metrics_manager.record_disruption(
+                sim_time=self.simulation_time,
+                disruption_type=disruption_type,
+                intersection_id="global",
+                is_global=True,
+                duration_seconds=0,
+                speed_modifier=self.speed_modifier
+            )
         
         self._update_speed_modifier()
 
     def _clear_disruption(self):
         """Clear disruption at selected intersection."""
         intersection_id = INTERSECTION_IDS[self.selected_intersection_index]
+        intersection_pt = INTERSECTION_NAMES_PT.get(intersection_id, intersection_id)
         
         if intersection_id in self.active_disruptions:
             disruption_type = self.active_disruptions[intersection_id]
@@ -449,7 +763,7 @@ class Environment:
             if disruption_type == DisruptionType.ACCIDENT:
                 self.deactivate_map_crash()
             
-            print(f"[DISRUPTION] Cleared at {intersection_id}")
+            print(f"[PERTURBAÇÃO] Limpo em {intersection_pt}")
         
         self._update_speed_modifier()
 
@@ -460,7 +774,7 @@ class Environment:
         self.global_disruption = DisruptionType.NONE
         self.deactivate_map_crash()
         self._update_speed_modifier()
-        print("[DISRUPTION] All disruptions cleared")
+        print("[PERTURBAÇÃO] Todas as perturbações foram limpas")
 
     def _trigger_random_disruption(self):
         """Trigger a random disruption at a random intersection."""
@@ -502,114 +816,127 @@ class Environment:
         return disruption in [DisruptionType.ROAD_CLOSURE, DisruptionType.ACCIDENT]
 
     def draw_help_overlay(self):
-        """Draw the help overlay showing keyboard shortcuts."""
+        """Draw the help overlay showing keyboard shortcuts (Portuguese)."""
         # Semi-transparent background
-        overlay = pygame.Surface((450, 550))
+        overlay = pygame.Surface((500, 620))
         overlay.fill((20, 20, 40))
         overlay.set_alpha(230)
         
-        # Position in center of screen
-        x = (1280 - 450) // 2
-        y = (720 - 550) // 2
-        self.screen.blit(overlay, (x, y))
+        # Position in center of game surface
+        x = (self.BASE_WIDTH - 500) // 2
+        y = (self.BASE_HEIGHT - 620) // 2
+        self.game_surface.blit(overlay, (x, y))
         
         # Draw border
-        pygame.draw.rect(self.screen, (100, 100, 200), (x, y, 450, 550), 3)
+        pygame.draw.rect(self.game_surface, (100, 100, 200), (x, y, 500, 620), 3)
         
         # Title
-        title = self.font_large.render("CONTROLS", True, (255, 255, 255))
-        self.screen.blit(title, (x + 170, y + 15))
+        title = self.font_large.render("CONTROLOS", True, (255, 255, 255))
+        self.game_surface.blit(title, (x + 195, y + 15))
         
-        # Help text
+        # Help text (Portuguese)
         help_lines = [
-            ("TIME CONTROLS:", ""),
-            ("SPACE", "Pause / Resume"),
-            ("+/-", "Speed up / Slow down"),
-            ("F2", "Realtime (1x)"),
-            ("F3", "Fast (10x)"),
-            ("F4", "Ultra fast (60x)"),
-            ("F5", "Set to 06:00 (morning)"),
-            ("F6", "Set to 08:00 (rush hour)"),
-            ("F7", "Set to 12:00 (noon)"),
-            ("F8", "Set to 18:00 (evening rush)"),
+            ("CONTROLOS DE TEMPO:", ""),
+            ("ESPAÇO", "Pausar / Retomar"),
+            ("+/-", "Acelerar / Abrandar"),
+            ("F2", "Tempo real (1x)"),
+            ("F3", "Rápido (10x)"),
+            ("F4", "Ultra rápido (60x)"),
+            ("F5", "Definir 06:00 (madrugada)"),
+            ("F6", "Definir 08:00 (hora ponta)"),
+            ("F7", "Definir 12:00 (meio-dia)"),
+            ("F8", "Definir 18:00 (hora ponta)"),
             ("", ""),
-            ("DISRUPTIONS:", ""),
-            ("TAB", "Select next intersection"),
-            ("1", "Accident"),
-            ("2", "Construction"),
-            ("3", "Bad Weather (global)"),
-            ("4", "Road Closure"),
-            ("5", "Special Event"),
-            ("0", "Clear (selected)"),
-            ("C", "Clear ALL"),
-            ("R", "Random disruption"),
+            ("PERTURBAÇÕES:", ""),
+            ("TAB", "Selecionar cruzamento"),
+            ("1", "Acidente"),
+            ("2", "Obras"),
+            ("3", "Mau Tempo (global)"),
+            ("4", "Estrada Cortada"),
+            ("5", "Evento Especial"),
+            ("0", "Limpar (selecionado)"),
+            ("C", "Limpar TUDO"),
+            ("R", "Perturbação aleatória"),
             ("", ""),
-            ("F1", "Toggle this help"),
-            ("ESC", "Exit simulation"),
+            ("VISUALIZAÇÃO:", ""),
+            ("F9/F10", "Mudar de monitor"),
+            ("F11", "Alternar ecrã inteiro"),
+            ("F12", "Mostrar/ocultar FPS"),
+            ("F1", "Mostrar/ocultar esta ajuda"),
+            ("ESC", "Sair da simulação"),
         ]
         
         y_offset = 50
         for key, description in help_lines:
-            if key in ["TIME CONTROLS:", "DISRUPTIONS:"]:
+            if key in ["CONTROLOS DE TEMPO:", "PERTURBAÇÕES:", "VISUALIZAÇÃO:"]:
                 text = self.font_medium.render(key, True, (255, 200, 100))
-                self.screen.blit(text, (x + 20, y + y_offset))
+                self.game_surface.blit(text, (x + 20, y + y_offset))
             elif key:
                 # Key
                 key_text = self.font_medium.render(f"[{key}]", True, (150, 255, 150))
-                self.screen.blit(key_text, (x + 20, y + y_offset))
+                self.game_surface.blit(key_text, (x + 20, y + y_offset))
                 # Description
                 desc_text = self.font_small.render(description, True, (200, 200, 200))
-                self.screen.blit(desc_text, (x + 120, y + y_offset + 2))
+                self.game_surface.blit(desc_text, (x + 140, y + y_offset + 2))
             y_offset += 20
         
         # Current status
         selected = INTERSECTION_IDS[self.selected_intersection_index]
-        selection_text = self.font_medium.render(f"Selected: {selected}", True, (100, 255, 100))
-        self.screen.blit(selection_text, (x + 20, y + 515))
+        selected_pt = INTERSECTION_NAMES_PT.get(selected, selected)
+        selection_text = self.font_medium.render(f"Selecionado: {selected_pt}", True, (100, 255, 100))
+        self.game_surface.blit(selection_text, (x + 20, y + 585))
 
     def draw_time_display(self):
         """Draw the simulation time and controls at the top right."""
         # Background panel
-        pygame.draw.rect(self.screen, (20, 20, 40), (1000, 5, 275, 85), border_radius=8)
-        pygame.draw.rect(self.screen, (60, 60, 100), (1000, 5, 275, 85), 2, border_radius=8)
+        pygame.draw.rect(self.game_surface, (20, 20, 40), (990, 5, 285, 85), border_radius=8)
+        pygame.draw.rect(self.game_surface, (60, 60, 100), (990, 5, 285, 85), 2, border_radius=8)
         
         # Time display
         time_str = self.simulation_time.strftime("%H:%M:%S")
         time_text = self.font_time.render(time_str, True, (255, 255, 255))
-        self.screen.blit(time_text, (1010, 10))
+        self.game_surface.blit(time_text, (1000, 10))
         
         # Date display
-        date_str = self.simulation_time.strftime("%a, %b %d")
+        date_str = self.simulation_time.strftime("%d/%m/%Y")
         date_text = self.font_small.render(date_str, True, (180, 180, 180))
-        self.screen.blit(date_text, (1140, 20))
+        self.game_surface.blit(date_text, (1140, 20))
         
-        # Speed indicator
+        # Speed indicator (Portuguese)
         if self.is_paused:
-            speed_str = "PAUSED"
+            speed_str = "PAUSADO"
             speed_color = (255, 100, 100)
         elif self.time_speed == 1:
-            speed_str = "REALTIME"
+            speed_str = "TEMPO REAL"
             speed_color = (100, 255, 100)
         else:
-            speed_str = f"{self.time_speed}x SPEED"
+            speed_str = f"VELOCIDADE {self.time_speed}x"
             speed_color = (255, 255, 100)
         
         speed_text = self.font_medium.render(speed_str, True, speed_color)
-        self.screen.blit(speed_text, (1010, 50))
+        self.game_surface.blit(speed_text, (1000, 50))
         
-        # Time period and traffic level
+        # Time period and traffic level (Portuguese)
         period = self.get_time_period_name()
         traffic = self.get_traffic_level_name()
-        info_str = f"{period} | Traffic: {traffic}"
+        info_str = f"{period} | Tráfego: {traffic}"
         info_text = self.font_small.render(info_str, True, (150, 150, 200))
-        self.screen.blit(info_text, (1010, 72))
+        self.game_surface.blit(info_text, (1000, 72))
+
+    def draw_fps_display(self):
+        """Draw FPS counter."""
+        if self.show_fps:
+            fps = self.clock.get_fps()
+            fps_text = self.font_small.render(f"FPS: {fps:.0f}", True, (255, 255, 255))
+            pygame.draw.rect(self.game_surface, (20, 20, 40), (5, 5, 70, 22), border_radius=4)
+            self.game_surface.blit(fps_text, (10, 8))
 
     def draw_disruption_indicators(self):
         """Draw visual indicators for active disruptions."""
         # Draw selected intersection highlight
         selected_id = INTERSECTION_IDS[self.selected_intersection_index]
         center = self.intersection_centers[selected_id]
-        pygame.draw.circle(self.screen, (255, 255, 0), center, 85, 3)  # Yellow selection ring
+        pygame.draw.circle(self.game_surface, (255, 255, 0), center, 85, 3)  # Yellow selection ring
         
         # Draw disruption indicators at each intersection
         for intersection_id, disruption_type in self.active_disruptions.items():
@@ -617,62 +944,70 @@ class Environment:
             color = self.disruption_colors[disruption_type]
             
             # Draw filled indicator circle
-            pygame.draw.circle(self.screen, color, center, 20)
-            pygame.draw.circle(self.screen, (255, 255, 255), center, 20, 2)
+            pygame.draw.circle(self.game_surface, color, center, 20)
+            pygame.draw.circle(self.game_surface, (255, 255, 255), center, 20, 2)
             
-            # Draw disruption type label
-            label = disruption_type[:3].upper()
+            # Draw disruption type label (Portuguese abbreviation)
+            label_map = {
+                DisruptionType.ACCIDENT: "ACI",
+                DisruptionType.CONSTRUCTION: "OBR",
+                DisruptionType.BAD_WEATHER: "TMP",
+                DisruptionType.ROAD_CLOSURE: "CRT",
+                DisruptionType.SPECIAL_EVENT: "EVT",
+            }
+            label = label_map.get(disruption_type, "???")
             text = self.font_small.render(label, True, (255, 255, 255))
             text_rect = text.get_rect(center=(center[0], center[1] - 35))
-            self.screen.blit(text, text_rect)
+            self.game_surface.blit(text, text_rect)
         
         # Draw global disruption indicator
         if self.global_disruption != DisruptionType.NONE:
             # Draw weather overlay effect
             if self.global_disruption == DisruptionType.BAD_WEATHER:
-                weather_overlay = pygame.Surface((1280, 720))
+                weather_overlay = pygame.Surface((self.BASE_WIDTH, self.BASE_HEIGHT))
                 weather_overlay.fill((100, 100, 150))
                 weather_overlay.set_alpha(50)
-                self.screen.blit(weather_overlay, (0, 0))
+                self.game_surface.blit(weather_overlay, (0, 0))
             
-            # Draw global status bar
-            status_text = f"GLOBAL: {self.global_disruption.upper()}"
+            # Draw global status bar (Portuguese)
+            disruption_pt = DISRUPTION_LABELS_PT.get(self.global_disruption, self.global_disruption)
+            status_text = f"GLOBAL: {disruption_pt.upper()}"
             text = self.font_medium.render(status_text, True, self.disruption_colors[self.global_disruption])
-            pygame.draw.rect(self.screen, (30, 30, 50), (10, 10, 250, 30))
-            self.screen.blit(text, (20, 15))
+            pygame.draw.rect(self.game_surface, (30, 30, 50), (10, 30, 280, 30))
+            self.game_surface.blit(text, (20, 35))
         
         # Draw status bar with current info
         self._draw_status_bar()
 
     def _draw_status_bar(self):
-        """Draw status bar at bottom of screen."""
+        """Draw status bar at bottom of screen (Portuguese)."""
         # Background
-        pygame.draw.rect(self.screen, (30, 30, 50), (0, 690, 1280, 30))
+        pygame.draw.rect(self.game_surface, (30, 30, 50), (0, 690, self.BASE_WIDTH, 30))
         
         # Info text
         selected = INTERSECTION_IDS[self.selected_intersection_index]
+        selected_pt = INTERSECTION_NAMES_PT.get(selected, selected)
         active_count = len(self.active_disruptions)
-        speed_percent = int(self.speed_modifier * 100)
         density_percent = int(self.current_traffic_density * 100)
         
-        status = f"Selected: {selected} | Disruptions: {active_count} | Traffic Density: {density_percent}% | Press F1 for Help"
+        status = f"Selecionado: {selected_pt} | Perturbações: {active_count} | Densidade: {density_percent}% | Prima F1 para Ajuda"
         text = self.font_small.render(status, True, (200, 200, 200))
-        self.screen.blit(text, (10, 695))
+        self.game_surface.blit(text, (10, 695))
         
         # Disruption legend (compact)
         legend_x = 950
         for dtype, color in self.disruption_colors.items():
             if dtype != DisruptionType.NONE:
-                pygame.draw.circle(self.screen, color, (legend_x, 705), 6)
+                pygame.draw.circle(self.game_surface, color, (legend_x, 705), 6)
                 legend_x += 15
 
     def draw_day_night_overlay(self):
         """Draw day/night lighting effect."""
         if self.day_night_overlay_alpha > 0:
-            night_overlay = pygame.Surface((1280, 720))
+            night_overlay = pygame.Surface((self.BASE_WIDTH, self.BASE_HEIGHT))
             night_overlay.fill((0, 0, 30))
             night_overlay.set_alpha(self.day_night_overlay_alpha)
-            self.screen.blit(night_overlay, (0, 0))
+            self.game_surface.blit(night_overlay, (0, 0))
 
     def collision_sprite(self, sprite):
         if pygame.sprite.spritecollide(sprite, self.intersections, False):
@@ -688,7 +1023,7 @@ class Environment:
             csv_writer = csv.writer(csv_file)
             csv_writer.writerows(data)
 
-        print('Records saved on file with name: ' + file_name)
+        print('Registos guardados no ficheiro: ' + file_name)
 
     # deteta colisão entre veículo e zona de semáforo
     def collision_traffic_light(self, sprite):
@@ -703,36 +1038,61 @@ class Environment:
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 self.write_on_csv(self.cars_stopped_times)
+                self.save_all_metrics()
                 pygame.quit()
                 exit()
             elif event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_ESCAPE:
                     self.write_on_csv(self.cars_stopped_times)
+                    self.save_all_metrics()
                     pygame.quit()
                     exit()
                 else:
                     self.handle_keyboard_events(event)
+            elif event.type == pygame.VIDEORESIZE:
+                # Handle window resize (only in windowed mode)
+                if not self.fullscreen:
+                    self.screen_width = event.w
+                    self.screen_height = event.h
+                    self.screen = pygame.display.set_mode(
+                        (self.screen_width, self.screen_height),
+                        pygame.DOUBLEBUF | pygame.RESIZABLE,
+                        vsync=1
+                    )
+                    self._calculate_scaling()
         
         # Update simulation time
         self.update_simulation_time()
+        
+        # Record metrics periodically
+        self._record_metrics_periodically()
 
-        self.intersections.draw(self.screen)
-
-        self.screen.blit(self.bg_surf, (0, 0))
+        # ============================================================
+        # RENDER TO GAME SURFACE (at base resolution)
+        # ============================================================
+        
+        # Draw background
+        self.game_surface.blit(self.bg_surf, (0, 0))
+        
+        # Draw intersections (for collision detection, usually invisible)
+        # self.intersections.draw(self.game_surface)
 
         if self.map_crash:
-            self.collisions.draw(self.screen)
+            self.collisions.draw(self.game_surface)
 
         # renderiza todos os semáforos ativos
         for tl in self.traffic_lights:
+            tl.screen = self.game_surface  # Ensure traffic lights draw to game surface
             tl.draw()
 
         # renderiza veículos comuns
         for car in self.cars:
+            car.sprites()[0].screen = self.game_surface  # Ensure cars draw to game surface
             car.sprites()[0].draw()
 
         # renderiza veículos de emergência
         for emergency_car in self.emergency_cars:
+            emergency_car.sprites()[0].screen = self.game_surface
             emergency_car.sprites()[0].draw()
 
         # Draw day/night effect
@@ -744,16 +1104,44 @@ class Environment:
         # Draw time display
         self.draw_time_display()
         
+        # Draw FPS
+        self.draw_fps_display()
+        
         # Draw help overlay if active
         if self.show_help:
             self.draw_help_overlay()
 
-        pygame.display.update()
-        self.clock.tick(60)
+        # ============================================================
+        # SCALE AND DISPLAY
+        # ============================================================
+        
+        # Clear the actual screen (for letterboxing)
+        self.screen.fill((0, 0, 0))
+        
+        # Scale the game surface to fit the screen
+        if self.scale != 1.0:
+            scaled_surface = pygame.transform.smoothscale(
+                self.game_surface, 
+                (self.scaled_width, self.scaled_height)
+            )
+        else:
+            scaled_surface = self.game_surface
+        
+        # Blit centered on screen
+        self.screen.blit(scaled_surface, (self.offset_x, self.offset_y))
+
+        pygame.display.flip()
+        
+        # Use vsync (clock.tick with 0 lets vsync control the framerate)
+        if self.target_fps > 0:
+            self.clock.tick(self.target_fps)
+        else:
+            self.clock.tick()  # Let vsync handle it
 
     def add_car(self, car_id):
         car = pygame.sprite.GroupSingle()
-        car.add(Car(self.screen, str(car_id).replace("carro_", "").replace("@localhost", "")))
+        new_car = Car(self.game_surface, str(car_id).replace("carro_", "").replace("@localhost", ""))
+        car.add(new_car)
         self.cars.append(car)
 
         self.car_positions[str(car_id)] = car.sprites()[0].get_car_position()
@@ -819,6 +1207,101 @@ class Environment:
         self.vehicles_passed_per_intersection[intersection_id] += 1
         if car_id:
             self.cars_passed_intersections[intersection_id].add(car_id)
+        
+        # Also record to metrics manager
+        self.metrics_manager.record_traffic_flow(
+            sim_time=self.simulation_time,
+            intersection_id=intersection_id,
+            vehicles_passed=1,
+            direction="through",
+            vehicle_type="car" if car_id and "carro" in str(car_id) else "emergency"
+        )
+
+    def _record_metrics_periodically(self):
+        """Record system metrics periodically for analysis and ML training."""
+        now = datetime.now()
+        
+        # Only record every few seconds of real time
+        if (now - self.last_metrics_save).total_seconds() < self.metrics_save_interval:
+            return
+        
+        self.last_metrics_save = now
+        
+        # Calculate total stopped vehicles
+        total_stopped = sum(len(cars) for cars in self.cars_stopped_at_tl.values())
+        
+        # Calculate average waiting time for current session
+        total_wait = 0
+        for stop in self.cars_stopped_times[-100:]:  # Last 100 stops
+            try:
+                time_parts = stop[2].split(":")
+                total_wait += int(time_parts[0]) * 3600 + int(time_parts[1]) * 60 + int(time_parts[2])
+            except:
+                pass
+        avg_wait = total_wait / max(1, len(self.cars_stopped_times[-100:]))
+        
+        # Record system snapshot
+        self.metrics_manager.record_system_snapshot(
+            sim_time=self.simulation_time,
+            total_cars=len(self.cars),
+            total_emergency_cars=len(self.emergency_cars),
+            total_stopped=total_stopped,
+            avg_speed=self.get_average_speed(),
+            avg_waiting_time=avg_wait,
+            traffic_density=self.current_traffic_density,
+            active_disruptions=len(self.active_disruptions),
+            global_disruption=self.global_disruption,
+            speed_modifier=self.speed_modifier,
+            time_speed_multiplier=self.time_speed,
+            is_paused=self.is_paused
+        )
+        
+        # Record congestion and intersection metrics for each intersection
+        for intersection_id in INTERSECTION_IDS:
+            congestion = self.calculate_congestion_level(intersection_id)
+            
+            # Count stopped at this intersection
+            stopped_at_intersection = 0
+            for tl_id, cars in self.cars_stopped_at_tl.items():
+                if intersection_id in tl_id:
+                    stopped_at_intersection += len(cars)
+            
+            # Record congestion
+            self.metrics_manager.record_congestion(
+                sim_time=self.simulation_time,
+                intersection_id=intersection_id,
+                congestion_level=congestion,
+                stopped_vehicles=stopped_at_intersection,
+                traffic_density=self.current_traffic_density
+            )
+            
+            # Record intersection metrics
+            has_disruption = intersection_id in self.active_disruptions
+            disruption_type = self.active_disruptions.get(intersection_id, "none")
+            
+            self.metrics_manager.record_intersection_metrics(
+                sim_time=self.simulation_time,
+                intersection_id=intersection_id,
+                vehicles_passed_total=self.vehicles_passed_per_intersection.get(intersection_id, 0),
+                congestion_level=congestion,
+                has_disruption=has_disruption,
+                disruption_type=disruption_type,
+                vertical_light_state="unknown",  # Would need traffic light agent info
+                horizontal_light_state="unknown"
+            )
+
+    def save_all_metrics(self):
+        """Save all metrics to disk and create session summary."""
+        # Flush all buffers
+        self.metrics_manager.flush_all()
+        
+        # Save session summary
+        self.metrics_manager.save_session_summary(self.get_metrics_summary())
+        
+        # Print file locations
+        print("\n[METRICS] Ficheiros de dados guardados:")
+        for name, path in self.metrics_manager.get_session_files().items():
+            print(f"   {name}: {path}")
 
     def calculate_congestion_level(self, intersection_id):
         """
@@ -894,46 +1377,52 @@ class Environment:
         }
 
     def print_metrics_summary(self):
-        """Print a formatted summary of performance metrics."""
+        """Print a formatted summary of performance metrics (Portuguese)."""
         metrics = self.get_metrics_summary()
         
         print("\n" + "=" * 80)
-        print("PERFORMANCE METRICS SUMMARY")
+        print("RESUMO DE MÉTRICAS DE DESEMPENHO")
         print("=" * 80)
         
-        print(f"\n📊 SIMULATION OVERVIEW")
-        print(f"   Real Duration: {metrics['simulation_duration_seconds']:.1f} seconds")
-        print(f"   Simulation Time: {metrics['simulation_time']}")
-        print(f"   Time Speed: {metrics['time_speed']}x")
-        print(f"   Active Cars: {metrics['total_cars_active']}")
-        print(f"   Active Emergency Vehicles: {metrics['total_emergency_cars_active']}")
-        print(f"   Traffic Density: {metrics['traffic_density']:.0%}")
+        print(f"\n📊 VISÃO GERAL DA SIMULAÇÃO")
+        print(f"   Duração Real: {metrics['simulation_duration_seconds']:.1f} segundos")
+        print(f"   Tempo Simulado: {metrics['simulation_time']}")
+        print(f"   Velocidade Tempo: {metrics['time_speed']}x")
+        print(f"   Carros Ativos: {metrics['total_cars_active']}")
+        print(f"   Veículos Emergência Ativos: {metrics['total_emergency_cars_active']}")
+        print(f"   Densidade Tráfego: {metrics['traffic_density']:.0%}")
         
-        print(f"\n⏱️ WAITING TIMES")
-        print(f"   Total Stops: {metrics['total_stops']}")
-        print(f"   Average Wait: {metrics['average_waiting_time_seconds']:.2f} seconds")
-        print(f"   Total Wait Time: {metrics['total_waiting_time_seconds']} seconds")
+        print(f"\n⏱️ TEMPOS DE ESPERA")
+        print(f"   Total de Paragens: {metrics['total_stops']}")
+        print(f"   Espera Média: {metrics['average_waiting_time_seconds']:.2f} segundos")
+        print(f"   Tempo Total Espera: {metrics['total_waiting_time_seconds']} segundos")
         
-        print(f"\n🚗 VEHICLES PASSED PER INTERSECTION")
+        print(f"\n🚗 VEÍCULOS POR CRUZAMENTO")
         for intersection_id in INTERSECTION_IDS:
             count = metrics['vehicles_passed_per_intersection'].get(intersection_id, 0)
-            print(f"   {intersection_id}: {count} vehicles")
+            intersection_pt = INTERSECTION_NAMES_PT.get(intersection_id, intersection_id)
+            print(f"   {intersection_pt}: {count} veículos")
         
-        print(f"\n🚦 CONGESTION LEVELS (0=low, 1=high)")
+        print(f"\n🚦 NÍVEIS DE CONGESTIONAMENTO (0=baixo, 1=alto)")
         for intersection_id in INTERSECTION_IDS:
             level = metrics['congestion_levels'].get(intersection_id, 0)
             bar = "█" * int(level * 10) + "░" * (10 - int(level * 10))
-            print(f"   {intersection_id}: [{bar}] {level:.2f}")
+            intersection_pt = INTERSECTION_NAMES_PT.get(intersection_id, intersection_id)
+            print(f"   {intersection_pt}: [{bar}] {level:.2f}")
         
-        print(f"\n🏎️ AVERAGE SPEED: {metrics['average_speed']:.2f} pixels/second")
+        print(f"\n🏎️ VELOCIDADE MÉDIA: {metrics['average_speed']:.2f} pixels/segundo")
         
-        print(f"\n⚠️ DISRUPTIONS")
+        print(f"\n⚠️ PERTURBAÇÕES")
         if metrics['active_disruptions']:
             for intersection_id, dtype in metrics['active_disruptions'].items():
-                print(f"   {intersection_id}: {dtype}")
+                intersection_pt = INTERSECTION_NAMES_PT.get(intersection_id, intersection_id)
+                disruption_pt = DISRUPTION_LABELS_PT.get(dtype, dtype)
+                print(f"   {intersection_pt}: {disruption_pt}")
         else:
-            print("   No local disruptions active")
-        print(f"   Global: {metrics['global_disruption']}")
+            print("   Sem perturbações locais ativas")
+        
+        global_pt = DISRUPTION_LABELS_PT.get(metrics['global_disruption'], metrics['global_disruption'])
+        print(f"   Global: {global_pt}")
         
         print("=" * 80)
 
@@ -942,7 +1431,7 @@ class Environment:
         return self.car_positions
 
     def add_traffic_light(self, tl_jid, tl_id, tl_pos, angle):
-        tl = TrafficLight(self.screen, tl_id, tl_pos, angle)
+        tl = TrafficLight(self.game_surface, tl_id, tl_pos, angle)
         self.traffic_lights.add(tl)
 
         self.traffic_lights_objects[str(tl_id)] = tl
@@ -967,10 +1456,11 @@ class Environment:
     # devolve referência para controlo pelo agente correspondente
     def add_emergency_car(self, car_id):
         car = pygame.sprite.GroupSingle()
-        car.add(EmergencyCar(self.screen, str(car_id).replace("car_", "").replace("@localhost", "")))
+        car.add(EmergencyCar(self.game_surface, str(car_id).replace("emergencia_carro_", "").replace("@localhost", "")))
         self.emergency_cars.append(car)
-
-        #self.car_positions[str(car_id)] = car.sprites()[0].get_car_position()
+        
+        # Track position like regular cars
+        self.car_positions[str(car_id)] = car.sprites()[0].get_car_position()
 
         return car
 

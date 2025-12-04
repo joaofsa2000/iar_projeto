@@ -1,22 +1,31 @@
+# Map/EmergencyCar.py
+"""
+Emergency vehicle sprite that uses the same movement logic as normal cars
+but doesn't stop at red lights.
+"""
+
 import math
 import random
-import time
 import pygame
 from Models.Directions import Directions
+from Map.Car import (Car, get_lane_position, _get_first_turn_for_route, 
+                     _get_road_section, _get_angle_for_entry, _calculate_turn_direction,
+                     LANE_OFFSETS, ROAD_CENTERS_X, ROAD_CENTERS_Y)
+from Models.PathFinding import get_traffic_network, get_pathfinder, get_random_destination
 
 AMBULANCE = ['Map/Resources/Cars/ambulancia-1.png', 'Map/Resources/Cars/ambulancia-2.png']
 POLICE = ['Map/Resources/Cars/policia-1.png', 'Map/Resources/Cars/policia-2.png']
 
-directions_options = [Directions.RIGHT, Directions.LEFT, Directions.FORWARD]
-spawning_points = [
-    ((310, 780), 0), ((669, 780), 0), ((1034, 780), 0),  # faixas inferiores
-    ((244, -50), 180), ((603, -50), 180), ((969, -50), 180),  # faixas superiores
-    ((-50, 201), -90), ((-50, 552), -90),  # faixas esquerdas
-    ((1340, 135), 90), ((1340, 486), 90)  # faixas direitas
-]
+# Entry points list
+ENTRY_POINTS = ["south_left", "south_mid", "south_right",
+                "north_left", "north_mid", "north_right",
+                "west_top", "west_bottom",
+                "east_top", "east_bottom"]
 
 
 class EmergencyCar(pygame.sprite.Sprite):
+    """Emergency vehicle that follows the same paths as regular cars but with priority."""
+    
     def __init__(self, screen, id):
         super().__init__()
 
@@ -24,324 +33,377 @@ class EmergencyCar(pygame.sprite.Sprite):
         self.animation_count = 1
         self.car_type = random.choice([POLICE, AMBULANCE])
 
-        # configura os parâmetros iniciais da instância
         self.id = id
-        self.contador = 0
-        spawning_point = random.choice(spawning_points)
-
         self.screen = screen
+        self.base_speed = 2  # Same speed as regular cars for correct turning
         self.car_speed = 0
-        self.angle = spawning_point[1]
+        
+        # A* Pathfinding
+        self.network = get_traffic_network()
+        self.pathfinder = get_pathfinder()
+        
+        # Choose entry point and calculate route first
+        self.entry_point = random.choice(ENTRY_POINTS)
+        self.angle = _get_angle_for_entry(self.entry_point)
+        self.destination = get_random_destination(self.entry_point)
+        self.route = self._calculate_route()
+        self.current_route_index = 0
+        self.passed_intersections = set()
+        
+        # Calculate first turn direction using the same logic as Car
+        first_turn = _get_first_turn_for_route(self.entry_point, self.route, self.destination, self.angle, self.network)
+        self.next_turn_direction = first_turn
+        
+        # Get appropriate lane based on first turn
+        road_section = _get_road_section(self.entry_point)
+        spawn_pos = get_lane_position(self.entry_point, first_turn, road_section)
+        
+        # Debug info
+        car_type_name = "AMBULÂNCIA" if self.car_type == AMBULANCE else "POLÍCIA"
+        lane_name = {Directions.LEFT: "ESQUERDA", Directions.RIGHT: "DIREITA", Directions.FORWARD: "FRENTE"}
+        turn_name = lane_name.get(first_turn, "FRENTE")
+        if self.route:
+            print(f"[{car_type_name} {self.id}] Faixa: {turn_name} | Rota: {self.entry_point} -> {' -> '.join(self.route)} -> {self.destination}")
+        else:
+            print(f"[{car_type_name} {self.id}] Faixa: {turn_name} | Rota direta: {self.entry_point} -> {self.destination}")
 
-        self.next_turn_direction = random.choice(directions_options)
-
+        # State flags - EXACTLY like Car
         self.is_car_stopped = False
         self.car_is_turning = False
         self.car_at_traffic_light = False
-
         self.is_turning = (False, '')
         self.is_switching_lane = (False, '')
-        self.is_changing_direction = False
-
         self.turning_ticks = 0
         self.turning_rotation_done = 0
-
-        # carrega a textura inicial do veículo de emergência
-        self.image = pygame.image.load(self.car_type[self.get_next_animation_index()]).convert_alpha()
-        self.rect = self.image.get_rect(midtop=spawning_point[0])
-        self.fires_car()
-
-        # inicializa mudança de faixa para preparar primeira decisão
-        self.activate_switching_lane()
-
         self.stopped_at_tl_id = False
+        self.stopped_at_tl_start_time = False
 
-    # atualiza o indicador de presença em zona de semáforo
+        # Load sprite
+        self.image = pygame.image.load(self.car_type[self.get_next_animation_index()]).convert_alpha()
+        self.rect = self.image.get_rect(midtop=spawn_pos)
+        
+        # Start moving
+        self.fires_car(speed=2)
+
+    def _calculate_route(self):
+        """Calculate route using A* algorithm - same as Car."""
+        if self.entry_point not in self.network.entry_points:
+            return []
+        
+        _, _, start_node = self.network.entry_points[self.entry_point]
+        
+        if self.destination not in self.network.exit_points:
+            return []
+            
+        _, _, end_node = self.network.exit_points[self.destination]
+        
+        return self.pathfinder.find_path(start_node, end_node) or []
+
+    def _get_time_multiplier(self):
+        """Get time multiplier - same as Car."""
+        if Car.is_paused:
+            return 0
+        return min(Car.time_speed, 10)
+
+    def _update_next_turn(self):
+        """Update next turn direction based on route - uses same logic as Car."""
+        if not self.route or self.current_route_index >= len(self.route):
+            self.next_turn_direction = Directions.FORWARD
+            return
+        
+        current_node_id = self.route[self.current_route_index]
+        
+        if self.current_route_index < len(self.route) - 1:
+            # Turn to reach the next intersection
+            next_node_id = self.route[self.current_route_index + 1]
+            self.next_turn_direction = _calculate_turn_direction(
+                current_node_id, next_node_id, self.angle, self.network, is_exit=False
+            )
+        else:
+            # Last intersection - turn to reach the exit
+            self.next_turn_direction = _calculate_turn_direction(
+                current_node_id, self.destination, self.angle, self.network, is_exit=True
+            )
+
+    def advance_route(self):
+        """Advance to next intersection in route - same as Car."""
+        if self.current_route_index < len(self.route):
+            current_intersection = self.route[self.current_route_index]
+            self.passed_intersections.add(current_intersection)
+            self.current_route_index += 1
+            self._update_next_turn()
+
     def set_car_at_tl(self, flag=True):
         self.car_at_traffic_light = flag
 
-    # obtém as coordenadas e orientação atual do veículo
     def get_car_position(self):
         return (self.rect.centerx, self.rect.centery, self.angle)
 
-    # dispara mudança de carril ao concluir manobra de curva
     def flag_car_is_turning(self, flag):
-        if self.car_is_turning and not flag: self.activate_switching_lane()
+        """Called when turning state changes - same as Car."""
+        if self.car_is_turning and not flag:
+            # Advance route (which also updates next turn direction)
+            self.advance_route()
         self.car_is_turning = flag
 
-    # verifica se o veículo saiu dos limites do mapa
     def is_car_done(self):
-        if self.rect.x < -160: return True
-        if self.rect.x > 1500: return True
-        if self.rect.y > 900: return True
-        if self.rect.y < -160: return True
+        """Check if vehicle has left the map."""
+        return (self.rect.x < -100 or self.rect.x > 1400 or 
+                self.rect.y > 850 or self.rect.y < -100)
 
-        return False
-
-    # atribui velocidade ao veículo e marca como ativo
     def fires_car(self, speed=2):
+        """Start moving - same as Car."""
         self.is_car_stopped = False
-        self.car_speed = speed
+        self.base_speed = speed
+        self.car_speed = speed * self._get_time_multiplier()
 
-    # anula a velocidade e marca veículo como parado
     def stop_car(self):
+        """Stop the car - same as Car."""
         self.is_car_stopped = True
+        self.base_speed = 0
         self.car_speed = 0
 
-    # desloca o veículo segundo a direção angular atual
     def go_forward(self):
-        if self.angle > 360: self.angle = 0 + self.angle - 360
-        if self.angle < -360: self.angle = 0 + self.angle + 360
+        """Move forward - EXACTLY the same as Car."""
+        if Car.is_paused:
+            return
+            
+        # Normalize angle - same as Car
+        if self.angle > 360:
+            self.angle = self.angle - 360
+        if self.angle < -360:
+            self.angle = self.angle + 360
 
+        effective_speed = self.base_speed * self._get_time_multiplier()
         radians = math.radians(self.angle)
-        vertical = math.cos(radians) * self.car_speed
-        horizontal = math.sin(radians) * self.car_speed
+        vertical = math.cos(radians) * effective_speed
+        horizontal = math.sin(radians) * effective_speed
 
         self.rect.x -= horizontal
         self.rect.y -= vertical
 
-    # determina futura posição baseada em velocidade e orientação
     def get_next_position(self):
+        effective_speed = self.base_speed * self._get_time_multiplier()
         radians = math.radians(self.angle)
-        vertical = math.cos(radians) * self.car_speed
-        horizontal = math.sin(radians) * self.car_speed
-
+        vertical = math.cos(radians) * effective_speed
+        horizontal = math.sin(radians) * effective_speed
         return ((self.rect.x - horizontal), (self.rect.y - vertical))
 
-    # começa processo de conversão na interseção
     def activate_turning(self):
+        """Start turning at intersection - same as Car."""
         if not self.car_is_turning:
             self.is_turning = (True, self.next_turn_direction)
             self.car_is_turning = True
             self.fires_car()
+            # Pre-calculate the target lane position for the turn endpoint
+            self._calculate_turn_target()
 
-    # encerra estado de rotação ativa
     def ending_turning(self):
+        """End turning - same as Car."""
         self.is_turning = (False, '')
-        self.fires_car()
+        # Snap to target position calculated at turn start
+        if hasattr(self, 'turn_target_pos') and self.turn_target_pos is not None:
+            if self.turn_target_pos[0] is not None:
+                self.rect.centerx = self.turn_target_pos[0]
+            if self.turn_target_pos[1] is not None:
+                self.rect.centery = self.turn_target_pos[1]
+            self.turn_target_pos = None
+    
+    def _calculate_turn_target(self):
+        """Calculate where the car should end up after completing the turn."""
+        future_turn = self._peek_turn_after_current()
+        
+        if future_turn == Directions.LEFT:
+            target_offset = LANE_OFFSETS["left_turn"]
+        elif future_turn == Directions.RIGHT:
+            target_offset = LANE_OFFSETS["right_turn"]
+        else:
+            target_offset = LANE_OFFSETS["straight"]
+        
+        angle_norm = self.angle % 360
+        if angle_norm < 0:
+            angle_norm += 360
+        
+        current_turn = self.is_turning[1] if self.is_turning[0] else self.next_turn_direction
+        if current_turn == Directions.LEFT:
+            new_angle = (angle_norm + 90) % 360
+        elif current_turn == Directions.RIGHT:
+            new_angle = (angle_norm - 90) % 360
+        else:
+            new_angle = angle_norm
+        
+        target_x = None
+        target_y = None
+        
+        if 315 <= new_angle or new_angle < 45:
+            road_centers = [ROAD_CENTERS_X["left"], ROAD_CENTERS_X["mid"], ROAD_CENTERS_X["right"]]
+            nearest_center = min(road_centers, key=lambda c: abs(c - self.rect.centerx))
+            target_x = nearest_center + target_offset
+            
+        elif 135 <= new_angle < 225:
+            road_centers = [ROAD_CENTERS_X["left"], ROAD_CENTERS_X["mid"], ROAD_CENTERS_X["right"]]
+            nearest_center = min(road_centers, key=lambda c: abs(c - self.rect.centerx))
+            target_x = nearest_center - target_offset
+            
+        elif 45 <= new_angle < 135:
+            road_centers = [ROAD_CENTERS_Y["top"], ROAD_CENTERS_Y["bottom"]]
+            nearest_center = min(road_centers, key=lambda c: abs(c - self.rect.centery))
+            target_y = nearest_center - target_offset
+            
+        elif 225 <= new_angle < 315:
+            road_centers = [ROAD_CENTERS_Y["top"], ROAD_CENTERS_Y["bottom"]]
+            nearest_center = min(road_centers, key=lambda c: abs(c - self.rect.centery))
+            target_y = nearest_center + target_offset
+        
+        self.turn_target_pos = (target_x, target_y)
+    
+    def _peek_turn_after_current(self):
+        """Look ahead to see what turn direction is needed after this intersection."""
+        future_index = self.current_route_index + 1
+        
+        if not self.route or future_index >= len(self.route):
+            if self.route and future_index - 1 < len(self.route):
+                last_node = self.route[future_index - 1] if future_index - 1 >= 0 else None
+                if last_node:
+                    angle_norm = self.angle % 360
+                    current_turn = self.is_turning[1] if self.is_turning[0] else self.next_turn_direction
+                    if current_turn == Directions.LEFT:
+                        new_angle = angle_norm + 90
+                    elif current_turn == Directions.RIGHT:
+                        new_angle = angle_norm - 90
+                    else:
+                        new_angle = angle_norm
+                    
+                    return _calculate_turn_direction(
+                        last_node, self.destination, new_angle, self.network, is_exit=True
+                    )
+            return Directions.FORWARD
+        
+        current_node = self.route[future_index - 1] if future_index > 0 and future_index - 1 < len(self.route) else None
+        next_node = self.route[future_index] if future_index < len(self.route) else None
+        
+        if current_node and next_node:
+            angle_norm = self.angle % 360
+            current_turn = self.is_turning[1] if self.is_turning[0] else self.next_turn_direction
+            if current_turn == Directions.LEFT:
+                new_angle = angle_norm + 90
+            elif current_turn == Directions.RIGHT:
+                new_angle = angle_norm - 90
+            else:
+                new_angle = angle_norm
+            
+            return _calculate_turn_direction(
+                current_node, next_node, new_angle, self.network, is_exit=False
+            )
+        
+        return Directions.FORWARD
 
-    # inicia transição entre faixas e define próxima trajetória
-    def activate_switching_lane(self):
-        self.fires_car()
-        self.next_turn_direction = random.choice(directions_options)
-
-        self.is_switching_lane = (True, self.next_turn_direction)
-
-    # completa mudança de carril
-    def end_switching_lane(self):
-        self.is_switching_lane = (False, '')
-        self.fires_car()
-
-    # coordena lógica de execução das curvas
     def handle_turning(self):
+        """Handle turning logic - EXACTLY the same as Car."""
+        if Car.is_paused:
+            return
+            
         if self.is_turning[1] == Directions.FORWARD:
             self.ending_turning()
             return
 
-        self.turning_ticks += 0 if self.car_speed == 0 else 1
+        time_mult = self._get_time_multiplier()
+        self.turning_ticks += 0 if self.base_speed == 0 else time_mult
 
         if self.is_turning[1] == Directions.RIGHT:
             self.turn_right()
-            return
-
-        if self.is_turning[1] == Directions.LEFT:
+        elif self.is_turning[1] == Directions.LEFT:
             self.turn_left()
-            return
 
     def turn_left(self):
-        # avança parcialmente no cruzamento antes de iniciar rotação
+        """Turn left - EXACTLY the same as Car."""
+        time_mult = self._get_time_multiplier()
+        
         if self.turning_ticks < 58:
             self.go_forward()
             return
 
-        if self.turning_ticks == 60:
+        if 58 <= self.turning_ticks < 60:
             self.stop_car()
             return
 
-        # efetua rotação progressiva de 90° em passos de 6° por atualização
         if self.turning_rotation_done < 90:
-            self.angle += 6
-            self.turning_rotation_done += 6
-
+            rotation_step = min(6 * time_mult, 90 - self.turning_rotation_done)
+            self.angle += rotation_step
+            self.turning_rotation_done += rotation_step
             self.fires_car()
             self.go_forward()
             self.stop_car()
-
             self.draw()
 
-        # finaliza manobra e retoma deslocamento linear
         if self.turning_rotation_done >= 90:
             self.ending_turning()
             self.fires_car()
             self.go_forward()
-
             self.turning_rotation_done = 0
             self.turning_ticks = 0
 
     def turn_right(self):
-        # permite entrada controlada na interseção antes de curvar
+        """Turn right - EXACTLY the same as Car."""
+        time_mult = self._get_time_multiplier()
+        
         if self.turning_ticks < 25:
             self.go_forward()
             return
 
-        if self.turning_ticks == 26:
+        if 25 <= self.turning_ticks < 27:
             self.stop_car()
             return
 
-        # aplica rotação gradual de 90° através de incrementos de 6°
         if self.turning_rotation_done < 90:
-            self.angle -= 6
-            self.turning_rotation_done += 6
-
+            rotation_step = min(6 * time_mult, 90 - self.turning_rotation_done)
+            self.angle -= rotation_step
+            self.turning_rotation_done += rotation_step
             self.fires_car()
             self.go_forward()
             self.stop_car()
-
             self.draw()
 
-        # conclui viragem e prossegue em linha reta
         if self.turning_rotation_done >= 90:
             self.ending_turning()
             self.fires_car()
             self.go_forward()
-
             self.turning_rotation_done = 0
             self.turning_ticks = 0
 
-    # executa reposicionamento lateral na via
-    def switch_lane(self, direction):
-        # mantém curso reto quando não há necessidade de ajuste lateral
-        if direction == Directions.FORWARD:
-            self.fires_car()
-            self.go_forward()
-            self.end_switching_lane()
-            return
-
-        # realiza ajuste angular de 65° para transição de faixa
-        if self.turning_rotation_done < 65:
-            self.angle = self.angle + 5 if direction == Directions.LEFT else self.angle - 5
-            self.turning_rotation_done += 5
-
-            self.fires_car(speed=3)
-            self.go_forward()
-            self.stop_car()
-
-            self.draw()
-
-        # restaura orientação original após reposicionamento
-        if self.turning_rotation_done >= 65:
-            self.angle = self.angle - self.turning_rotation_done if direction == Directions.LEFT else self.angle + self.turning_rotation_done
-            self.draw()
-
-            self.end_switching_lane()
-            self.fires_car()
-            self.go_forward()
-
-            self.turning_rotation_done = 0
-
-    # renderiza sprite com rotação e frame de animação adequados
     def draw(self):
+        """Draw the sprite - with siren animation."""
         self.image = pygame.image.load(self.car_type[self.get_next_animation_index()]).convert_alpha()
-
         rotated_image = pygame.transform.rotate(self.image, self.angle)
         self.rect = rotated_image.get_rect(center=self.rect.center)
-
         self.screen.blit(rotated_image, self.rect.topleft)
 
-    # ciclo principal de comportamento do veículo emergência
     def update(self):
+        """Update method - same structure as Car but no collision avoidance."""
+        if Car.is_paused:
+            return
+            
         if self.is_turning[0]:
             self.handle_turning()
-        elif self.is_switching_lane[0]:
-            self.switch_lane(self.is_switching_lane[1])
         else:
-            if not self.is_car_stopped: self.fires_car(speed=4)
+            # Emergency vehicles just go forward, don't do lane switching
             self.go_forward()
 
-    # alterna frames da textura para simular piscar das sirenes
+        # Check if car left the map
+        if self.rect.x < -100 or self.rect.x > 1400 or self.rect.y > 850 or self.rect.y < -100:
+            pass  # Will be handled by agent
+
     def get_next_animation_index(self):
+        """Animate siren lights."""
         animation_frame = 20
         max_index = len(self.car_type) - 1
 
         if (animation_frame / self.animation_count) == 1:
             self.animation_index += 1
-            if self.animation_index > max_index: self.animation_index = 0
+            if self.animation_index > max_index:
+                self.animation_index = 0
             self.animation_count = 1
         else:
             self.animation_count += 1
 
         return self.animation_index
-
-    # marca início de alteração de trajetória
-    def activate_changing_direction(self):
-        self.is_changing_direction = True
-
-    # remove marca de alteração de trajetória
-    def disable_changing_direction(self):
-        self.is_changing_direction = False
-
-    # verifica se há mudança de direção em progresso
-    def is_car_changing_direction(self):
-        return self.is_changing_direction
-
-    # força ajuste de trajetória para faixa diferente da planeada
-    def change_direction(self, lane):
-        # cancela direção previamente configurada
-        self.flag_car_is_turning(False)
-
-        # mapeia transições válidas entre faixas
-        POSSIBLE_LANES = {
-            "l": ["r"],
-            "c": ["l", "r"],
-            "r": ["l"],
-        }
-
-        # escolhe aleatoriamente destino de mudança de faixa
-        new_direction = random.choice(POSSIBLE_LANES[lane])
-
-        # ajusta posição horizontal/vertical conforme ângulo e faixa destino
-        if new_direction == "l":
-            if self.angle == 0:
-                self.rect.x -= 24
-            elif self.angle == 90:
-                self.rect.y += 24
-            elif self.angle == 180:
-                self.rect.x += 24
-            elif self.angle == 270:
-                self.rect.y -= 24
-            elif self.angle == 360:
-                self.rect.x -= 24
-            elif self.angle == -90:
-                self.rect.y -= 24
-            elif self.angle == -180:
-                self.rect.x += 24
-            elif self.angle == -270:
-                self.rect.y += 24
-            elif self.angle == -360:
-                self.rect.x -= 24
-
-            # redefine próxima conversão baseada na faixa atual
-            self.next_turn_direction = Directions.LEFT if lane == "c" else Directions.FORWARD
-
-        if new_direction == "r":
-            if self.angle == 0:
-                self.rect.x += 24
-            elif self.angle == 90:
-                self.rect.y -= 24
-            elif self.angle == 180:
-                self.rect.x -= 24
-            elif self.angle == 270:
-                self.rect.y += 24
-            elif self.angle == 360:
-                self.rect.x += 24
-            elif self.angle == -90:
-                self.rect.y += 24
-            elif self.angle == -180:
-                self.rect.x -= 24
-            elif self.angle == -270:
-                self.rect.y -= 24
-            elif self.angle == -360:
-                self.rect.x += 24
-
-            # atualiza próxima manobra de acordo com nova posição
-            self.next_turn_direction = Directions.RIGHT if lane == "c" else Directions.FORWARD
