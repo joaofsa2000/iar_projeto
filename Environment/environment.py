@@ -196,7 +196,7 @@ class Environment:
         self.emergency_cars_awaiting_time = {}
         self.car_positions = {}
         self.cars_stopped_at_tl = {}
-        self.car_waiting_start_times = {}  # {car_id: datetime} - tracks when each car started waiting
+        self.car_waiting_start_times = {}  # {car_id: datetime} - tracks when each car started waiting (simulation time)
 
         # estruturas de dados para gestão de semáforos
         self.traffic_lights = pygame.sprite.Group()
@@ -235,8 +235,16 @@ class Environment:
         self.show_lane_debug = False  # F10 mostra linhas de debug das faixas
         self.active_disruptions = {}  # {intersection_id: DisruptionType}
         self.disruption_start_times = {}  # {intersection_id: datetime}
+        self.disruption_end_times = {}  # {intersection_id: datetime} - when disruption will end (for countdown)
         self.global_disruption = DisruptionType.NONE  # Perturbação global (ex: tempo)
         self.speed_modifier = 1.0  # Redução de velocidade por perturbações (1.0 = normal)
+        
+        # Disruption duration ranges (in seconds of simulation time)
+        self.disruption_durations = {
+            DisruptionType.ACCIDENT: (30, 120),      # 30-120 seconds
+            DisruptionType.CONSTRUCTION: (60, 300), # 60-300 seconds
+            DisruptionType.ROAD_CLOSURE: (30, 60),   # 30-60 seconds
+        }
 
         # Track recently cleared accidents for temporary green lights
         self.recently_cleared_accidents = {}  # {intersection_id: clear_time}
@@ -252,6 +260,9 @@ class Environment:
         
         # Selected intersection for disruption placement
         self.selected_intersection_index = 0
+        
+        # Reference to chaos agent (set by main.py)
+        self.chaos_agent_jid = None
         
         # ============================================================
         # MÉTRICAS DE DESEMPENHO
@@ -768,18 +779,44 @@ class Environment:
                 self._trigger_random_disruption()
 
     def _trigger_disruption(self, disruption_type):
-        """Trigger a disruption at the selected intersection."""
+        """Trigger a disruption at the selected intersection (manual control)."""
         intersection_id = INTERSECTION_IDS[self.selected_intersection_index]
+        self.trigger_disruption_at_intersection(intersection_id, disruption_type, managed_by_chaos=False)
+    
+    def trigger_disruption_at_intersection(self, intersection_id, disruption_type, managed_by_chaos=False):
+        """
+        Trigger a disruption at a specific intersection.
+        
+        Args:
+            intersection_id: ID of the intersection
+            disruption_type: Type of disruption (DisruptionType)
+            managed_by_chaos: If True, this is managed by ChaosAgent; if False, it's manual
+        
+        Returns:
+            bool: True if disruption was triggered, False if it already exists
+        """
         intersection_pt = INTERSECTION_NAMES_PT.get(intersection_id, intersection_id)
         disruption_pt = DISRUPTION_LABELS_PT.get(disruption_type, disruption_type)
         
-        # If same disruption already active, remove it
+        # If same disruption already active at this intersection, don't trigger again
         if self.active_disruptions.get(intersection_id) == disruption_type:
-            self._clear_disruption()
-            return
+            return False
+        
+        # If a different disruption is active, clear it first
+        if intersection_id in self.active_disruptions:
+            self.clear_disruption_at_intersection(intersection_id)
         
         self.active_disruptions[intersection_id] = disruption_type
-        self.disruption_start_times[intersection_id] = datetime.now()
+        self.disruption_start_times[intersection_id] = self.simulation_time
+        
+        # Calculate random duration based on disruption type and set end time
+        if disruption_type in self.disruption_durations:
+            min_duration, max_duration = self.disruption_durations[disruption_type]
+            duration_seconds = random.randint(min_duration, max_duration)
+            self.disruption_end_times[intersection_id] = self.simulation_time + timedelta(seconds=duration_seconds)
+        else:
+            # Default duration if type not specified
+            self.disruption_end_times[intersection_id] = self.simulation_time + timedelta(seconds=60)
         
         # Block intersection in pathfinder for accidents and road closures
         if disruption_type in [DisruptionType.ACCIDENT, DisruptionType.ROAD_CLOSURE]:
@@ -805,7 +842,14 @@ class Environment:
             speed_modifier=self.speed_modifier
         )
         
-        print(f"[PERTURBAÇÃO] {disruption_pt.upper()} ativado em {intersection_pt}")
+        source = "CHAOS AGENT" if managed_by_chaos else "MANUAL"
+        print(f"[PERTURBAÇÃO] {disruption_pt.upper()} ativado em {intersection_pt} ({source})")
+        
+        # Notify chaos agent if this was a manual trigger
+        if not managed_by_chaos and self.chaos_agent_jid:
+            self._notify_chaos_agent(intersection_id, "manual_trigger")
+        
+        return True
 
     def _toggle_global_disruption(self, disruption_type):
         """Toggle a global disruption (affects entire map)."""
@@ -831,8 +875,21 @@ class Environment:
         self._update_speed_modifier()
 
     def _clear_disruption(self):
-        """Clear disruption at selected intersection."""
+        """Clear disruption at selected intersection (manual control)."""
         intersection_id = INTERSECTION_IDS[self.selected_intersection_index]
+        self.clear_disruption_at_intersection(intersection_id, managed_by_chaos=False)
+    
+    def clear_disruption_at_intersection(self, intersection_id, managed_by_chaos=False):
+        """
+        Clear disruption at a specific intersection.
+        
+        Args:
+            intersection_id: ID of the intersection
+            managed_by_chaos: If True, this is managed by ChaosAgent; if False, it's manual
+        
+        Returns:
+            bool: True if disruption was cleared, False if none existed
+        """
         intersection_pt = INTERSECTION_NAMES_PT.get(intersection_id, intersection_id)
         
         if intersection_id in self.active_disruptions:
@@ -842,12 +899,15 @@ class Environment:
             if intersection_id in self.disruption_start_times:
                 del self.disruption_start_times[intersection_id]
             
+            if intersection_id in self.disruption_end_times:
+                del self.disruption_end_times[intersection_id]
+            
             # Unblock intersection in pathfinder
             if disruption_type in [DisruptionType.ACCIDENT, DisruptionType.ROAD_CLOSURE]:
                 pathfinder = get_pathfinder()
                 pathfinder.unblock_intersection(intersection_id)
-                # Mark intersection as recently cleared for temporary green lights
-                self.recently_cleared_accidents[intersection_id] = datetime.now()
+                # Mark intersection as recently cleared for temporary green lights (uses simulation time)
+                self.recently_cleared_accidents[intersection_id] = self.simulation_time
                 # Restart cars waiting at traffic lights for this intersection
                 self._restart_cars_at_intersection_lights(intersection_id)
                 # Notify cars that intersection is clear
@@ -857,9 +917,18 @@ class Environment:
             if disruption_type == DisruptionType.ACCIDENT:
                 self.deactivate_map_crash()
             
-            print(f"[PERTURBAÇÃO] Limpo em {intersection_pt}")
+            source = "CHAOS AGENT" if managed_by_chaos else "MANUAL"
+            print(f"[PERTURBAÇÃO] Limpo em {intersection_pt} ({source})")
+            
+            self._update_speed_modifier()
+            
+            # Notify chaos agent if this was a manual clear
+            if not managed_by_chaos and self.chaos_agent_jid:
+                self._notify_chaos_agent(intersection_id, "manual_clear")
+            
+            return True
         
-        self._update_speed_modifier()
+        return False
 
     def _clear_all_disruptions(self):
         """Clear all active disruptions."""
@@ -872,6 +941,7 @@ class Environment:
         
         self.active_disruptions.clear()
         self.disruption_start_times.clear()
+        self.disruption_end_times.clear()
         self.global_disruption = DisruptionType.NONE
         self.deactivate_map_crash()
         self._update_speed_modifier()
@@ -956,6 +1026,40 @@ class Environment:
         """Check if an intersection is blocked (road closure or accident)."""
         disruption = self.get_disruption_at_intersection(intersection_id)
         return disruption in [DisruptionType.ROAD_CLOSURE, DisruptionType.ACCIDENT]
+    
+    def get_disruption_label(self, disruption_type):
+        """Get Portuguese label for a disruption type."""
+        return DISRUPTION_LABELS_PT.get(disruption_type, disruption_type)
+    
+    def get_intersection_name(self, intersection_id):
+        """Get Portuguese name for an intersection."""
+        return INTERSECTION_NAMES_PT.get(intersection_id, intersection_id)
+    
+    def set_chaos_agent_jid(self, jid):
+        """Set the JID of the chaos agent for coordination."""
+        self.chaos_agent_jid = jid
+    
+    def _notify_chaos_agent(self, intersection_id, action):
+        """Notify chaos agent about manual changes (async, fire and forget)."""
+        if not self.chaos_agent_jid:
+            return
+        
+        # This is a fire-and-forget notification
+        # In a real implementation, we'd use SPADE messaging
+        # For now, we'll just log it - the chaos agent will detect changes by checking active_disruptions
+        pass
+    
+    def _check_expired_disruptions(self):
+        """Check for disruptions that have expired and auto-clear them."""
+        expired_intersections = []
+        
+        for intersection_id, end_time in self.disruption_end_times.items():
+            if self.simulation_time >= end_time:
+                expired_intersections.append(intersection_id)
+        
+        # Clear expired disruptions
+        for intersection_id in expired_intersections:
+            self.clear_disruption_at_intersection(intersection_id, managed_by_chaos=False)
 
     def draw_help_overlay(self):
         """Draw the help overlay with tabs showing keyboard shortcuts (Portuguese).
@@ -1164,8 +1268,9 @@ class Environment:
                 self.game_surface.blit(weather_overlay, (0, 0))
 
     def draw_disruption_ui(self):
-        """Draw disruption UI elements directly to screen for sharp text."""
-        # Draw disruption labels at each intersection
+        """Draw disruption UI elements directly to screen for sharp text.
+        Labels and countdown timers are positioned inside the colored circle."""
+        # Draw disruption labels and countdown timers at each intersection
         for intersection_id, disruption_type in self.active_disruptions.items():
             center = self.intersection_centers[intersection_id]
             
@@ -1176,9 +1281,44 @@ class Environment:
                 DisruptionType.ROAD_CLOSURE: "CRT",
             }
             label = label_map.get(disruption_type, "???")
-            text = self.font_small.render(label, True, (255, 255, 255))
-            text_rect = text.get_rect(center=(self.sx(center[0]), self.sy(center[1]) - self.s(35)))
-            self.screen.blit(text, text_rect)
+            
+            # Calculate countdown timer (remaining time until disruption ends)
+            if intersection_id in self.disruption_end_times:
+                end_time = self.disruption_end_times[intersection_id]
+                remaining_seconds = (end_time - self.simulation_time).total_seconds()
+                
+                # Auto-clear if countdown reached 0
+                if remaining_seconds <= 0:
+                    self.clear_disruption_at_intersection(intersection_id, managed_by_chaos=False)
+                    continue
+                
+                # Format as MM:SS (countdown)
+                if remaining_seconds < 3600:
+                    minutes = int(remaining_seconds // 60)
+                    seconds = int(remaining_seconds % 60)
+                    timer_text = f"{minutes:02d}:{seconds:02d}"
+                else:
+                    hours = int(remaining_seconds // 3600)
+                    minutes = int((remaining_seconds % 3600) // 60)
+                    seconds = int(remaining_seconds % 60)
+                    timer_text = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+            else:
+                timer_text = "00:00"
+            
+            # Position label and timer inside the circle (center of circle)
+            # Circle is at center, radius 20, so we position text centered
+            screen_center_x = self.sx(center[0])
+            screen_center_y = self.sy(center[1])
+            
+            # Draw label (above center, inside circle)
+            label_text = self.font_small.render(label, True, (255, 255, 255))
+            label_rect = label_text.get_rect(center=(screen_center_x, screen_center_y - self.s(6)))
+            self.screen.blit(label_text, label_rect)
+            
+            # Draw countdown timer (below label, inside circle)
+            timer_surface = self.font_small.render(timer_text, True, (255, 255, 200))
+            timer_rect = timer_surface.get_rect(center=(screen_center_x, screen_center_y + self.s(6)))
+            self.screen.blit(timer_surface, timer_rect)
         
         # Draw global disruption status bar
         if self.global_disruption != DisruptionType.NONE:
@@ -1229,14 +1369,15 @@ class Environment:
     
     def draw_waiting_timers(self):
         """Draw waiting time timers on top of cars that are stopped at traffic lights.
-        Drawn to screen at native resolution for sharp text."""
+        Drawn to screen at native resolution for sharp text.
+        Uses simulation time so timers respect time speed."""
         # Use a small scaled font
         timer_font = pygame.font.Font(None, self.s(16))
         
         # Draw timer for each waiting car
         for car_id, start_time in list(self.car_waiting_start_times.items()):
-            # Calculate waiting time
-            elapsed = (datetime.now() - start_time).total_seconds()
+            # Calculate waiting time using simulation time (respects time speed)
+            elapsed = (self.simulation_time - start_time).total_seconds()
             
             # Format time with 1 decimal place
             time_text = f"{elapsed:.1f}"
@@ -1373,6 +1514,9 @@ class Environment:
         
         # Update simulation time
         self.update_simulation_time()
+        
+        # Check for expired disruptions and auto-clear them
+        self._check_expired_disruptions()
         
         # Record metrics periodically
         self._record_metrics_periodically()
@@ -1782,10 +1926,10 @@ class Environment:
             return LightStatus.RED
 
         # Check if this intersection was recently cleared from an accident
-        # Give it temporary green to clear waiting cars
+        # Give it temporary green to clear waiting cars (uses simulation time)
         if intersection_id and intersection_id in self.recently_cleared_accidents:
             clear_time = self.recently_cleared_accidents[intersection_id]
-            if (datetime.now() - clear_time).total_seconds() < 3:  # 3 seconds of green
+            if (self.simulation_time - clear_time).total_seconds() < 3:  # 3 seconds of green (simulation time)
                 return LightStatus.GREEN
             else:
                 # Remove expired temporary green
@@ -1837,9 +1981,9 @@ class Environment:
         return self.traffic_lights_agents_tl[str(tl_id)]
     
     def start_car_waiting(self, car_id):
-        """Record when a car starts waiting at a traffic light."""
+        """Record when a car starts waiting at a traffic light (uses simulation time)."""
         if car_id not in self.car_waiting_start_times:
-            self.car_waiting_start_times[car_id] = datetime.now()
+            self.car_waiting_start_times[car_id] = self.simulation_time
     
     def stop_car_waiting(self, car_id):
         """Clear the waiting time when a car starts moving."""
@@ -1847,9 +1991,9 @@ class Environment:
             del self.car_waiting_start_times[car_id]
     
     def get_car_waiting_time(self, car_id):
-        """Get how long a car has been waiting in seconds."""
+        """Get how long a car has been waiting in seconds (uses simulation time)."""
         if car_id in self.car_waiting_start_times:
-            elapsed = (datetime.now() - self.car_waiting_start_times[car_id]).total_seconds()
+            elapsed = (self.simulation_time - self.car_waiting_start_times[car_id]).total_seconds()
             return elapsed
         return 0
 

@@ -7,6 +7,7 @@ from Agents.CarAgent import CarAgent
 from Agents.MapUpdaterAgent import MapUpdaterAgent
 from Agents.TrafficLightAgent import TrafficLightAgent
 from Agents.EmergencyCarAgent import EmergencyCarAgent
+from Agents.ChaosAgent import ChaosAgent
 
 from Environment.environment import Environment
 from Models.LightStatus import LightStatus
@@ -32,6 +33,12 @@ async def main():
     num_initial_cars = 30  # Número de carros iniciais (aumentado)
     map_updater = MapUpdaterAgent("central@localhost", "pass", environment, initial_car_count=num_initial_cars)
     await map_updater.start(auto_register=True)
+    
+    # Cria e inicia o Chaos Agent (gerencia perturbações automaticamente)
+    print("[SETUP] Iniciando Chaos Agent (gerenciamento de perturbações)...")
+    chaos_agent = ChaosAgent("chaos@localhost", "pass", environment)
+    await chaos_agent.start(auto_register=True)
+    environment.set_chaos_agent_jid("chaos@localhost")
     
     # Definição dos semáforos
     # NOTA: CrossingTrafficLightModel espera: (id, bottom_tl, top_tl, left_tl, right_tl)
@@ -295,6 +302,12 @@ async def main():
             await map_updater.stop()
         except Exception as e:
             print(f"Erro ao parar map updater: {e}")
+        
+        print("Parando Chaos Agent...")
+        try:
+            await chaos_agent.stop()
+        except Exception as e:
+            print(f"Erro ao parar chaos agent: {e}")
 
         # Guardar todas as métricas para análise futura e treino de modelos
         print("\nGuardando métricas para análise e ML...")

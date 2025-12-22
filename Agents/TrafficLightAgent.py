@@ -28,9 +28,13 @@ class TrafficLightAgent(Agent):
         self.active_pair = "vertical"  # or "horizontal"
         
         # Timing configuration (can be adjusted dynamically)
-        self.green_duration = 8   # seconds for green phase
-        self.yellow_duration = 2  # seconds for yellow phase
+        # These are in SIMULATION TIME, not real time
+        self.green_duration = 8   # seconds for green phase (simulation time)
+        self.yellow_duration = 2  # seconds for yellow phase (simulation time)
         self.cycle_period = self.green_duration + self.yellow_duration  # total per pair
+        
+        # Track phase start times in simulation time
+        self.current_phase_start_time = None
 
         # Controlo de subscrições (FIPA Subscribe Protocol)
         self.subscribers = {}  # {car_jid: subscription_id}
@@ -173,8 +177,11 @@ class TrafficLightAgent(Agent):
                         self.agent.environment.update_traffic_light_status(tl.id, LightStatus.GREEN)
                         print(f"[SEMÁFORO {self.agent.jid}] Semáforo {tl.id} aberto para emergência")
 
-                    # Mantém estado de emergência por 10 segundos
-                    await asyncio.sleep(10)
+                    # Mantém estado de emergência por 10 segundos (simulation time)
+                    start_sim_time = self.agent.environment.simulation_time
+                    target_sim_time = start_sim_time + timedelta(seconds=10)
+                    while self.agent.environment.simulation_time < target_sim_time:
+                        await asyncio.sleep(0.1)
 
                     # Retoma ciclo normal
                     self.agent.normal_cycle = True
@@ -199,8 +206,11 @@ class TrafficLightAgent(Agent):
                         self.agent.green_duration = min(15, self.agent.green_duration + 3)
                         print(f"[SEMÁFORO {self.agent.jid}] Duração verde: {original_green}s -> {self.agent.green_duration}s")
                         
-                        # Reset after 60 seconds
-                        await asyncio.sleep(60)
+                        # Reset after 60 seconds (simulation time)
+                        start_sim_time = self.agent.environment.simulation_time
+                        target_sim_time = start_sim_time + timedelta(seconds=60)
+                        while self.agent.environment.simulation_time < target_sim_time:
+                            await asyncio.sleep(0.1)
                         self.agent.green_duration = original_green
                         print(f"[SEMÁFORO {self.agent.jid}] Duração verde resetada para {original_green}s")
 
@@ -316,60 +326,100 @@ class TrafficLightAgent(Agent):
         # ============================================================
         # COMPORTAMENTO PERIÓDICO – CICLO NORMAL COM PARES E AMARELO
         # Start this LAST and with the offset delay
+        # Uses simulation time instead of real time
         # ============================================================
         class NormalCycleBehaviour(CyclicBehaviour):
             def __init__(self, offset_seconds):
                 super().__init__()
                 self.offset_seconds = offset_seconds
                 self.started = False
+                self.current_phase = None  # "green", "yellow", or None
+                self.phase_start_sim_time = None
 
             async def run(self):
-                # Apply offset only once at the start
+                # Apply offset only once at the start (in real time for initial delay)
                 if not self.started:
                     if self.offset_seconds > 0:
                         await asyncio.sleep(self.offset_seconds)
                     self.started = True
+                    self.current_phase = None
 
                 if not self.agent.normal_cycle:
-                    await asyncio.sleep(1)
+                    await asyncio.sleep(0.1)
                     return
 
-                # Cycle: Active pair GREEN -> YELLOW -> RED, then switch pairs
+                # Get current active/inactive pairs
                 active = self.agent.active_pair
                 inactive = "horizontal" if active == "vertical" else "vertical"
                 
-                # Phase 1: Active pair goes GREEN, inactive stays RED
-                self.agent._set_pair_status(active, LightStatus.GREEN)
-                self.agent._set_pair_status(inactive, LightStatus.RED)
+                # State machine: green -> yellow -> red -> (switch) -> green (new pair)
                 
-                print(f"[SEMÁFORO {self.agent.jid}] Par {active.upper()}: VERDE | Par {inactive.upper()}: VERMELHO")
-                await self.notify_subscribers(f"{active.upper()}_GREEN")
+                # Phase 1: GREEN phase
+                if self.current_phase is None or self.current_phase == "red_complete":
+                    # Start new cycle with active pair going green
+                    self.agent._set_pair_status(active, LightStatus.GREEN)
+                    self.agent._set_pair_status(inactive, LightStatus.RED)
+                    
+                    print(f"[SEMÁFORO {self.agent.jid}] Par {active.upper()}: VERDE | Par {inactive.upper()}: VERMELHO")
+                    await self.notify_subscribers(f"{active.upper()}_GREEN")
+                    
+                    self.current_phase = "green"
+                    self.phase_start_sim_time = self.agent.environment.simulation_time
                 
-                # Wait for green duration
-                await asyncio.sleep(self.agent.green_duration)
+                # Wait for green duration (in simulation time)
+                if self.current_phase == "green":
+                    elapsed = (self.agent.environment.simulation_time - self.phase_start_sim_time).total_seconds()
+                    if elapsed < self.agent.green_duration:
+                        await asyncio.sleep(0.1)
+                        return
+                    
+                    if not self.agent.normal_cycle:
+                        return
+                    
+                    # Transition to yellow - set yellow immediately
+                    self.agent._set_pair_status(active, LightStatus.YELLOW)
+                    self.current_phase = "yellow"
+                    self.phase_start_sim_time = self.agent.environment.simulation_time
+                    
+                    print(f"[SEMÁFORO {self.agent.jid}] Par {active.upper()}: AMARELO | Par {inactive.upper()}: VERMELHO")
+                    await self.notify_subscribers(f"{active.upper()}_YELLOW")
                 
-                if not self.agent.normal_cycle:
+                # Phase 2: YELLOW phase - wait for yellow duration
+                if self.current_phase == "yellow":
+                    # Wait for yellow duration (in simulation time)
+                    elapsed = (self.agent.environment.simulation_time - self.phase_start_sim_time).total_seconds()
+                    if elapsed < self.agent.yellow_duration:
+                        await asyncio.sleep(0.1)
+                        return
+                    
+                    if not self.agent.normal_cycle:
+                        return
+                    
+                    # Transition to red - set red immediately
+                    self.agent._set_pair_status(active, LightStatus.RED)
+                    self.current_phase = "red"
+                    self.phase_start_sim_time = self.agent.environment.simulation_time
+                    
+                    print(f"[SEMÁFORO {self.agent.jid}] Par {active.upper()}: VERMELHO | Par {inactive.upper()}: VERMELHO")
+                
+                # Phase 3: RED phase - wait briefly then switch pairs
+                if self.current_phase == "red":
+                    # Brief red phase to ensure both pairs are red (0.5 seconds simulation time)
+                    elapsed = (self.agent.environment.simulation_time - self.phase_start_sim_time).total_seconds()
+                    if elapsed < 0.5:
+                        await asyncio.sleep(0.1)
+                        return
+                    
+                    if not self.agent.normal_cycle:
+                        return
+                    
+                    # Switch active pair for next cycle
+                    self.agent.active_pair = inactive
+                    self.current_phase = "red_complete"  # Mark that we've completed red phase
+                    
+                    print(f"[SEMÁFORO {self.agent.jid}] Alternando para par {inactive.upper()}")
+                    await asyncio.sleep(0.1)  # Small delay before starting new cycle
                     return
-                
-                # Phase 2: Active pair goes YELLOW (transition warning)
-                self.agent._set_pair_status(active, LightStatus.YELLOW)
-                
-                print(f"[SEMÁFORO {self.agent.jid}] Par {active.upper()}: AMARELO | Par {inactive.upper()}: VERMELHO")
-                await self.notify_subscribers(f"{active.upper()}_YELLOW")
-                
-                # Wait for yellow duration
-                await asyncio.sleep(self.agent.yellow_duration)
-                
-                if not self.agent.normal_cycle:
-                    return
-                
-                # Phase 3: Active pair goes RED, switch to other pair
-                self.agent._set_pair_status(active, LightStatus.RED)
-                
-                # Switch active pair for next cycle
-                self.agent.active_pair = inactive
-                
-                print(f"[SEMÁFORO {self.agent.jid}] Alternando para par {inactive.upper()}")
 
             async def notify_subscribers(self, status_info: str):
                 """Envia notificação INFORM para todos os subscritores"""
