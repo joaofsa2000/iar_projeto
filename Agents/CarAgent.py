@@ -118,7 +118,10 @@ class CarAgent(Agent):
                     # Reset waiting time tracking when moving
                     self.agent.waiting_start_time = None
                     self.agent.green_request_sent = False
-                    
+
+                    # Clear stopped at traffic light flag
+                    self.car.stopped_at_tl_id = False
+
                     # Stop tracking waiting time for visual timer
                     self.env.stop_car_waiting(self.id)
 
@@ -139,13 +142,38 @@ class CarAgent(Agent):
                 """Check waiting time and request green light if threshold exceeded."""
                 if self.agent.green_request_sent:
                     return
-                
+
                 if self.agent.waiting_start_time:
                     waiting_duration = (datetime.now() - self.agent.waiting_start_time).total_seconds()
-                    
+
                     if waiting_duration >= GREEN_REQUEST_THRESHOLD:
+                        # Check if the red light is due to an accident
+                        tl_status = self.env.get_traffic_light_status(tl_id)
+                        if tl_status == LightStatus.RED:
+                            # Check if intersection is blocked (accident)
+                            intersection_id = self._get_intersection_from_traffic_light(tl_id)
+                            if intersection_id and self.env.is_intersection_blocked(intersection_id):
+                                # Don't request green for accidents - just wait
+                                print(f"[CARRO {self.agent.jid}] Semáforo vermelho por acidente em {intersection_id} - aguardando")
+                                return
+
                         await self.request_green_light(tl_id)
                         self.agent.green_request_sent = True
+
+            def _get_intersection_from_traffic_light(self, tl_id):
+                """Extract intersection ID from traffic light ID."""
+                tl_id_str = str(tl_id)
+
+                intersection_patterns = [
+                    "top_left", "top_mid", "top_right",
+                    "bottom_left", "bottom_mid", "bottom_right"
+                ]
+
+                for intersection in intersection_patterns:
+                    if intersection in tl_id_str:
+                        return intersection
+
+                return None
 
             async def request_green_light(self, tl_id):
                 """Send FIPA Request to traffic light requesting green."""

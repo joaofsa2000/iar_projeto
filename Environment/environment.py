@@ -11,6 +11,8 @@ from Map.Crash import Crash
 from Map.EmergencyCar import EmergencyCar
 from Map.RoadMap import get_road_map
 from Data.MetricsManager import get_metrics_manager
+from Models.LightStatus import LightStatus
+from Models.PathFinding import get_pathfinder
 
 # Update Car class time speed whenever environment changes it
 def _sync_car_time_speed(time_speed, is_paused):
@@ -235,6 +237,9 @@ class Environment:
         self.disruption_start_times = {}  # {intersection_id: datetime}
         self.global_disruption = DisruptionType.NONE  # Perturbação global (ex: tempo)
         self.speed_modifier = 1.0  # Redução de velocidade por perturbações (1.0 = normal)
+
+        # Track recently cleared accidents for temporary green lights
+        self.recently_cleared_accidents = {}  # {intersection_id: clear_time}
         
         # Disruption visual indicators
         self.disruption_colors = {
@@ -776,6 +781,13 @@ class Environment:
         self.active_disruptions[intersection_id] = disruption_type
         self.disruption_start_times[intersection_id] = datetime.now()
         
+        # Block intersection in pathfinder for accidents and road closures
+        if disruption_type in [DisruptionType.ACCIDENT, DisruptionType.ROAD_CLOSURE]:
+            pathfinder = get_pathfinder()
+            pathfinder.block_intersection(intersection_id)
+            # Notify all cars to recalculate routes
+            self._notify_cars_of_blocked_intersection(intersection_id)
+        
         # Activate crash visual for accident
         if disruption_type == DisruptionType.ACCIDENT:
             self.activate_map_crash(intersection_id)
@@ -830,6 +842,17 @@ class Environment:
             if intersection_id in self.disruption_start_times:
                 del self.disruption_start_times[intersection_id]
             
+            # Unblock intersection in pathfinder
+            if disruption_type in [DisruptionType.ACCIDENT, DisruptionType.ROAD_CLOSURE]:
+                pathfinder = get_pathfinder()
+                pathfinder.unblock_intersection(intersection_id)
+                # Mark intersection as recently cleared for temporary green lights
+                self.recently_cleared_accidents[intersection_id] = datetime.now()
+                # Restart cars waiting at traffic lights for this intersection
+                self._restart_cars_at_intersection_lights(intersection_id)
+                # Notify cars that intersection is clear
+                self._notify_cars_intersection_cleared(intersection_id)
+            
             # Deactivate crash visual if it was an accident
             if disruption_type == DisruptionType.ACCIDENT:
                 self.deactivate_map_crash()
@@ -840,11 +863,26 @@ class Environment:
 
     def _clear_all_disruptions(self):
         """Clear all active disruptions."""
+        # Unblock all intersections in pathfinder
+        pathfinder = get_pathfinder()
+        for intersection_id in list(self.active_disruptions.keys()):
+            disruption_type = self.active_disruptions[intersection_id]
+            if disruption_type in [DisruptionType.ACCIDENT, DisruptionType.ROAD_CLOSURE]:
+                pathfinder.unblock_intersection(intersection_id)
+        
         self.active_disruptions.clear()
         self.disruption_start_times.clear()
         self.global_disruption = DisruptionType.NONE
         self.deactivate_map_crash()
         self._update_speed_modifier()
+        
+        # Notify all cars that intersections are cleared
+        for car_group in self.cars:
+            if car_group.sprites():
+                car = car_group.sprites()[0]
+                if hasattr(car, 'clear_waiting_for_accident'):
+                    car.clear_waiting_for_accident()
+        
         print("[PERTURBAÇÃO] Todas as perturbações foram limpas")
 
     def _trigger_random_disruption(self):
@@ -858,6 +896,40 @@ class Environment:
         
         self.selected_intersection_index = INTERSECTION_IDS.index(intersection_id)
         self._trigger_disruption(disruption_type)
+
+    def _notify_cars_of_blocked_intersection(self, blocked_intersection_id):
+        """Notify all cars that an intersection is blocked and they should recalculate routes."""
+        print(f"[AMBIENTE] A notificar carros sobre bloqueio em {blocked_intersection_id}")
+        
+        for car_group in self.cars:
+            if car_group.sprites():
+                car = car_group.sprites()[0]
+                if hasattr(car, 'handle_blocked_intersection'):
+                    car.handle_blocked_intersection(blocked_intersection_id)
+        
+        # Also notify emergency vehicles
+        for ecar_group in self.emergency_cars:
+            if ecar_group.sprites():
+                ecar = ecar_group.sprites()[0]
+                if hasattr(ecar, 'handle_blocked_intersection'):
+                    ecar.handle_blocked_intersection(blocked_intersection_id)
+    
+    def _notify_cars_intersection_cleared(self, intersection_id):
+        """Notify all cars that an intersection has been cleared."""
+        print(f"[AMBIENTE] A notificar carros que bloqueio foi removido de {intersection_id}")
+
+        for car_group in self.cars:
+            if car_group.sprites():
+                car = car_group.sprites()[0]
+                if hasattr(car, 'handle_intersection_cleared'):
+                    car.handle_intersection_cleared(intersection_id)
+
+        # Also notify emergency vehicles
+        for ecar_group in self.emergency_cars:
+            if ecar_group.sprites():
+                ecar = ecar_group.sprites()[0]
+                if hasattr(ecar, 'handle_intersection_cleared'):
+                    ecar.handle_intersection_cleared(intersection_id)
 
     def _update_speed_modifier(self):
         """Update speed modifier based on active disruptions."""
@@ -1702,7 +1774,63 @@ class Environment:
 
     # consulta estado atual de semáforo por identificador
     def get_traffic_light_status(self, tl_id):
+        """Get the status of a traffic light, considering accidents at the intersection."""
+        # Check if the intersection containing this traffic light is blocked by accident
+        intersection_id = self._get_intersection_from_traffic_light(tl_id)
+        if intersection_id and self.is_intersection_blocked(intersection_id):
+            # Intersection is blocked by accident - treat as red light
+            return LightStatus.RED
+
+        # Check if this intersection was recently cleared from an accident
+        # Give it temporary green to clear waiting cars
+        if intersection_id and intersection_id in self.recently_cleared_accidents:
+            clear_time = self.recently_cleared_accidents[intersection_id]
+            if (datetime.now() - clear_time).total_seconds() < 3:  # 3 seconds of green
+                return LightStatus.GREEN
+            else:
+                # Remove expired temporary green
+                del self.recently_cleared_accidents[intersection_id]
+
+        # Normal traffic light status
         return self.traffic_lights_status[str(tl_id)]
+
+    def _restart_cars_at_intersection_lights(self, intersection_id):
+        """Restart cars that are stopped at traffic lights for the cleared intersection."""
+        print(f"[AMBIENTE] Reiniciando carros parados nos semáforos de {intersection_id}")
+        restarted_count = 0
+
+        for car_group in self.cars:
+            if car_group.sprites():
+                car_sprite = car_group.sprites()[0]
+                # Check if this car group is stopped at a traffic light for the cleared intersection
+                # stopped_at_tl_id is stored on the group, not the sprite
+                if hasattr(car_group, 'stopped_at_tl_id') and car_group.stopped_at_tl_id:
+                    tl_intersection = self._get_intersection_from_traffic_light(car_group.stopped_at_tl_id)
+                    if tl_intersection == intersection_id and car_sprite.base_speed == 0:
+                        car_sprite.fires_car()
+                        restarted_count += 1
+
+        print(f"[AMBIENTE] Reiniciados {restarted_count} carros")
+
+        # Emergency vehicles don't stop at traffic lights, so skip that logic
+
+    def _get_intersection_from_traffic_light(self, tl_id):
+        """Extract intersection ID from traffic light ID."""
+        # Traffic light IDs are like: "top_left_n_left_tl", "bottom_mid_s_center_tl", etc.
+        # Extract the intersection part (e.g., "top_left", "bottom_mid")
+        tl_id_str = str(tl_id)
+
+        # Common patterns for intersection IDs in traffic light names
+        intersection_patterns = [
+            "top_left", "top_mid", "top_right",
+            "bottom_left", "bottom_mid", "bottom_right"
+        ]
+
+        for intersection in intersection_patterns:
+            if intersection in tl_id_str:
+                return intersection
+
+        return None
 
     # obtém identificador do agente responsável por semáforo
     def get_traffic_light_jid_by_id(self, tl_id):

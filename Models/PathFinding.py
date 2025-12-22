@@ -156,12 +156,39 @@ class AStarPathfinder:
     
     def __init__(self, network: TrafficNetwork):
         self.network = network
+        self.blocked_intersections: set = set()  # Intersections blocked by accidents
     
-    def find_path(self, start_id: str, goal_id: str) -> Optional[List[str]]:
+    def block_intersection(self, intersection_id: str):
+        """Mark an intersection as blocked (accident)."""
+        self.blocked_intersections.add(intersection_id)
+        print(f"[PATHFINDING] Cruzamento bloqueado: {intersection_id}")
+    
+    def unblock_intersection(self, intersection_id: str):
+        """Mark an intersection as unblocked (accident cleared)."""
+        self.blocked_intersections.discard(intersection_id)
+        print(f"[PATHFINDING] Cruzamento desbloqueado: {intersection_id}")
+    
+    def is_intersection_blocked(self, intersection_id: str) -> bool:
+        """Check if an intersection is blocked."""
+        return intersection_id in self.blocked_intersections
+    
+    def find_path(self, start_id: str, goal_id: str, avoid_blocked: bool = True) -> Optional[List[str]]:
         """
         Find the optimal path from start to goal using A*.
+        
+        Args:
+            start_id: Starting intersection ID
+            goal_id: Goal intersection ID
+            avoid_blocked: If True, avoid blocked intersections (accidents)
+        
+        Returns:
+            List of intersection IDs forming the path, or None if no path found
         """
         if start_id not in self.network.nodes or goal_id not in self.network.nodes:
+            return None
+        
+        # If goal is blocked and we must avoid it, no path is possible
+        if avoid_blocked and goal_id in self.blocked_intersections:
             return None
         
         if start_id == goal_id:
@@ -193,6 +220,10 @@ class AStarPathfinder:
             current = self.network.nodes[current_id]
             
             for neighbor_id, neighbor in current.neighbors.items():
+                # Skip blocked intersections if avoiding them
+                if avoid_blocked and neighbor_id in self.blocked_intersections:
+                    continue
+                
                 tentative_g = g_score[current_id] + self.network._euclidean_distance(
                     current.position, neighbor.position
                 )
@@ -207,6 +238,24 @@ class AStarPathfinder:
                         open_set_hash.add(neighbor_id)
         
         return None
+    
+    def find_path_through_blocked(self, start_id: str, goal_id: str, blocked_id: str) -> Optional[List[str]]:
+        """
+        Check if the only path to goal requires going through a specific blocked intersection.
+        
+        Returns:
+            The path that goes through the blocked intersection (if no alternative exists),
+            or None if an alternative path exists that avoids it.
+        """
+        # First, try to find a path avoiding blocked intersections
+        alt_path = self.find_path(start_id, goal_id, avoid_blocked=True)
+        if alt_path is not None:
+            # Alternative path exists, return None to indicate no need to go through blocked
+            return None
+        
+        # No alternative path - must go through blocked intersection
+        # Return path through it (ignoring blocked)
+        return self.find_path(start_id, goal_id, avoid_blocked=False)
     
     def _reconstruct_path(self, came_from: Dict[str, str], current: str) -> List[str]:
         """Reconstruct the path from start to goal."""
@@ -313,6 +362,35 @@ def calculate_route(start_entry: str, destination_exit: str) -> Optional[List[st
         return None
     
     return pathfinder.find_path(start_node, end_node)
+
+
+def recalculate_route_avoiding_blocked(current_intersection: str, destination_exit: str) -> Optional[List[str]]:
+    """
+    Recalculate a route from current position to destination, avoiding blocked intersections.
+    
+    Args:
+        current_intersection: The intersection the car is currently at or approaching
+        destination_exit: The exit point where the car wants to go
+    
+    Returns:
+        New route (list of intersection IDs), or None if no alternative exists
+    """
+    network = get_traffic_network()
+    pathfinder = get_pathfinder()
+    
+    # Get the end node for the destination
+    if destination_exit not in network.exit_points:
+        return None
+    
+    _, _, end_node = network.exit_points[destination_exit]
+    
+    # Try to find a path avoiding blocked intersections
+    return pathfinder.find_path(current_intersection, end_node, avoid_blocked=True)
+
+
+def route_requires_blocked_intersection(route: List[str], blocked_intersection: str) -> bool:
+    """Check if a route passes through a specific blocked intersection."""
+    return blocked_intersection in route
 
 
 def get_random_destination(entry_point: str) -> str:

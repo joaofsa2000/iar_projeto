@@ -4,7 +4,7 @@ import math
 import random
 import pygame
 from Models.Directions import Directions
-from Models.PathFinding import get_traffic_network, get_pathfinder, get_random_destination
+from Models.PathFinding import get_traffic_network, get_pathfinder, get_random_destination, recalculate_route_avoiding_blocked, route_requires_blocked_intersection
 from Map.RoadMap import get_road_map, Direction, LaneType
 
 # imagens disponíveis para os veículos
@@ -350,7 +350,10 @@ class Car(pygame.sprite.Sprite):
         
         # Register for collision tracking
         Car.register_car(self)
-        
+
+        # Check if any intersections in our route are currently blocked
+        self._check_route_for_blocked_intersections()
+
         self.fires_car()
 
         # Cars spawn in correct lane - no initial lane switching needed
@@ -363,6 +366,10 @@ class Car(pygame.sprite.Sprite):
         self.waiting_start_time = None  # When car started waiting
         self.yielding_to = None  # ID of car we're yielding to
         self.deadlock_check_counter = 0  # Counter to check deadlock periodically
+        
+        # For accident/blocked intersection handling
+        self.waiting_for_accident = False  # Waiting at traffic light because no alternative route
+        self.blocked_intersection_id = None  # Which intersection is blocking our route
 
     def __del__(self):
         """Cleanup when car is destroyed."""
@@ -403,6 +410,123 @@ class Car(pygame.sprite.Sprite):
             self.current_route_index += 1
             self._update_next_turn()
     
+    def handle_blocked_intersection(self, blocked_intersection_id):
+        """Handle notification that an intersection is blocked (accident).
+        
+        If the car hasn't reached that intersection yet, try to recalculate route.
+        If no alternative exists, mark car to wait at the traffic light before that intersection.
+        """
+        # Check if we're already at or past this intersection
+        if blocked_intersection_id in self.passed_intersections:
+            # Already passed it, no need to recalculate
+            return
+        
+        # Check if our remaining route goes through this intersection
+        remaining_route = self.route[self.current_route_index:]
+        if blocked_intersection_id not in remaining_route:
+            # Our route doesn't go through the blocked intersection
+            return
+        
+        print(f"[CARRO {self.id}] A rota passa pelo cruzamento bloqueado {blocked_intersection_id}")
+        
+        # Determine current intersection (or the one we're heading to)
+        if self.current_route_index < len(self.route):
+            current_node = self.route[self.current_route_index]
+        else:
+            # Already at last intersection, can't recalculate
+            return
+        
+        # Skip if current node IS the blocked one (we're already there)
+        if current_node == blocked_intersection_id:
+            print(f"[CARRO {self.id}] Já está no cruzamento bloqueado, a parar")
+            self.waiting_for_accident = True
+            self.blocked_intersection_id = blocked_intersection_id
+            self.stop_car()
+            return
+        
+        # Try to find alternative route
+        new_route = recalculate_route_avoiding_blocked(current_node, self.destination)
+        
+        if new_route is not None and len(new_route) > 0:
+            # Found alternative route!
+            old_route = ' -> '.join(self.route[self.current_route_index:])
+            new_route_str = ' -> '.join(new_route)
+            print(f"[CARRO {self.id}] Nova rota encontrada: {new_route_str} (antes: {old_route})")
+            
+            # Update the route from current position
+            self.route = self.route[:self.current_route_index] + new_route
+            self._update_next_turn()
+            self.waiting_for_accident = False
+            self.blocked_intersection_id = None
+        else:
+            # No alternative route - must wait at traffic light until accident clears
+            print(f"[CARRO {self.id}] Sem rota alternativa, vai esperar no semáforo")
+            self.waiting_for_accident = True
+            self.blocked_intersection_id = blocked_intersection_id
+    
+    def handle_intersection_cleared(self, intersection_id):
+        """Handle notification that a previously blocked intersection is now clear."""
+        # If this car was waiting for this intersection to clear, resume it
+        if self.blocked_intersection_id == intersection_id:
+            print(f"[CARRO {self.id}] Cruzamento {intersection_id} desbloqueado, a retomar rota")
+            self.waiting_for_accident = False
+            self.blocked_intersection_id = None
+            self.fires_car()
+        # Also check if car is currently waiting for any accident
+        elif self.waiting_for_accident:
+            # Check if the route is now clear
+            if not self._is_route_blocked():
+                print(f"[CARRO {self.id}] Rota agora livre após limpeza de {intersection_id}, a retomar")
+                self.waiting_for_accident = False
+                self.blocked_intersection_id = None
+                self.fires_car()
+    
+    def clear_waiting_for_accident(self):
+        """Clear the waiting for accident state (used when all disruptions are cleared)."""
+        if self.waiting_for_accident:
+            print(f"[CARRO {self.id}] Todas as perturbações limpas, a retomar")
+            self.waiting_for_accident = False
+            self.blocked_intersection_id = None
+            self.fires_car()
+
+    def is_at_blocked_intersection(self):
+        """Check if the car is currently at a blocked intersection."""
+        pathfinder = get_pathfinder()
+
+        # Check if current intersection (next in route) is blocked
+        if self.current_route_index < len(self.route):
+            next_intersection = self.route[self.current_route_index]
+            if pathfinder.is_intersection_blocked(next_intersection):
+                return True
+
+        return False
+
+    def _is_route_blocked(self):
+        """Check if any intersection in the remaining route is blocked."""
+        pathfinder = get_pathfinder()
+
+        # Check remaining route for blocked intersections
+        for i in range(self.current_route_index, len(self.route)):
+            intersection_id = self.route[i]
+            if pathfinder.is_intersection_blocked(intersection_id):
+                return True
+
+        return False
+
+    def _check_route_for_blocked_intersections(self):
+        """Check if any intersections in the current route are blocked and try to recalculate."""
+        if not self.route:
+            return
+
+        pathfinder = get_pathfinder()
+
+        # Check remaining route for blocked intersections
+        for i in range(self.current_route_index, len(self.route)):
+            intersection_id = self.route[i]
+            if pathfinder.is_intersection_blocked(intersection_id):
+                # Found a blocked intersection - try to recalculate route
+                self.handle_blocked_intersection(intersection_id)
+                break  # Only handle one blocked intersection at a time
 
     def set_car_at_tl(self, flag=True):
         self.car_at_traffic_light = flag
@@ -777,7 +901,7 @@ class Car(pygame.sprite.Sprite):
     def update(self):
         if Car.is_paused:
             return
-        
+
         # Check for car ahead to avoid collision
         if not self.is_turning[0] and not self.is_switching_lane[0]:
             blocking_car, is_intersection_conflict = self.check_car_ahead()

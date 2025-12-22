@@ -31,7 +31,7 @@ class TrafficLightAgent(Agent):
         self.green_duration = 8   # seconds for green phase
         self.yellow_duration = 2  # seconds for yellow phase
         self.cycle_period = self.green_duration + self.yellow_duration  # total per pair
-        
+
         # Controlo de subscrições (FIPA Subscribe Protocol)
         self.subscribers = {}  # {car_jid: subscription_id}
 
@@ -108,10 +108,10 @@ class TrafficLightAgent(Agent):
                         else:
                             # Emergency vehicle request
                             await self.send_agree(msg.sender, conv_id)
-                            success = await self.process_emergency_request(tl_id)
-                            if success:
+                        success = await self.process_emergency_request(tl_id)
+                        if success:
                                 await self.send_inform(msg.sender, conv_id, f"Luz verde ativada em {tl_id}")
-                            else:
+                        else:
                                 await self.send_failure(msg.sender, conv_id, "Não foi possível ativar luz verde")
 
             async def send_agree(self, recipient, conv_id):
@@ -203,7 +203,7 @@ class TrafficLightAgent(Agent):
                         await asyncio.sleep(60)
                         self.agent.green_duration = original_green
                         print(f"[SEMÁFORO {self.agent.jid}] Duração verde resetada para {original_green}s")
-                    
+
                     return True
                 except Exception as e:
                     print(f"[SEMÁFORO {self.agent.jid}] Erro ao ajustar tempos: {e}")
@@ -213,12 +213,37 @@ class TrafficLightAgent(Agent):
                 """Process request from car that has been waiting too long."""
                 try:
                     print(f"[SEMÁFORO {self.agent.jid}] Carro {sender} solicitando prioridade em {tl_id}")
+
+                    # Check if there's an accident at this intersection
+                    intersection_id = self._get_intersection_from_traffic_light(tl_id)
+                    if intersection_id and self.environment.is_intersection_blocked(intersection_id):
+                        print(f"[SEMÁFORO {self.agent.jid}] Recusando pedido - acidente em {intersection_id}")
+                        return False
+
                     # Note: We don't immediately switch, but this info can be used for adaptive timing
                     # The system will naturally cycle, but this could influence future timing decisions
                     return True
                 except Exception as e:
                     print(f"[SEMÁFORO {self.agent.jid}] Erro ao processar pedido de carro: {e}")
                     return False
+
+            def _get_intersection_from_traffic_light(self, tl_id):
+                """Extract intersection ID from traffic light ID."""
+                # Traffic light IDs are like: "top_left_n_left_tl", "bottom_mid_s_center_tl", etc.
+                # Extract the intersection part (e.g., "top_left", "bottom_mid")
+                tl_id_str = str(tl_id)
+
+                # Common patterns for intersection IDs in traffic light names
+                intersection_patterns = [
+                    "top_left", "top_mid", "top_right",
+                    "bottom_left", "bottom_mid", "bottom_right"
+                ]
+
+                for intersection in intersection_patterns:
+                    if intersection in tl_id_str:
+                        return intersection
+
+                return None
 
         template_request = Template()
         template_request.set_metadata("protocol", "fipa-request")
