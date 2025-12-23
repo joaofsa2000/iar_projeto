@@ -223,7 +223,8 @@ class Environment:
         # Traffic density based on time
         self.current_traffic_density = 0.5
         self.car_spawn_probability = 0.3  # Base probability per spawn check (30%)
-        self.min_cars_target = 25  # Target minimum number of cars to maintain
+        self.min_cars_target = 25  # Target minimum number of cars to maintain (will be dynamic)
+        self.max_cars_target = 50  # Maximum number of cars during peak hours
         
         # Day/night visual effects
         self.day_night_overlay_alpha = 0
@@ -632,18 +633,29 @@ class Environment:
         print(f"[TEMPO] Definido para {hour:02d}:00")
     
     def should_spawn_car(self):
-        """Determine if a new car should spawn based on traffic density and minimum target."""
+        """Determine if a new car should spawn based on traffic density and dynamic target."""
         if self.is_paused:
             return False
         
         current_cars = len(self.cars)
         
-        # Always spawn if below minimum target
-        if current_cars < self.min_cars_target:
+        # Calculate dynamic target based on traffic density
+        # Density 0.0 -> min_cars (10), Density 1.0 -> max_cars (50)
+        min_cars = 10  # Minimum cars during low traffic (night)
+        max_cars = 50  # Maximum cars during peak traffic (rush hour)
+        target_cars = int(min_cars + (self.current_traffic_density * (max_cars - min_cars)))
+        
+        # Always spawn if below target
+        if current_cars < target_cars:
             return True
         
-        # Otherwise use probability
-        return random.random() < self.car_spawn_probability
+        # If at or above target, use probability to maintain around target
+        # Higher probability when below target, lower when above
+        if current_cars < target_cars * 1.1:  # Within 10% of target
+            return random.random() < self.car_spawn_probability
+        else:
+            # Above target - very low spawn probability
+            return random.random() < (self.car_spawn_probability * 0.2)
     
     def get_traffic_level_name(self):
         """Get traffic level as a descriptive name (Portuguese)."""
@@ -959,12 +971,8 @@ class Environment:
         self.deactivate_map_crash()
         self._update_speed_modifier()
         
-        # Notify all cars that intersections are cleared
-        for car_group in self.cars:
-            if car_group.sprites():
-                car = car_group.sprites()[0]
-                if hasattr(car, 'clear_waiting_for_accident'):
-                    car.clear_waiting_for_accident()
+        # Note: Route recalculation is now handled by agents, not sprites
+        # Agents can check for blocked intersections themselves if needed
         
         print("[PERTURBAÇÃO] Todas as perturbações foram limpas")
 
@@ -981,38 +989,16 @@ class Environment:
         self._trigger_disruption(disruption_type)
 
     def _notify_cars_of_blocked_intersection(self, blocked_intersection_id):
-        """Notify all cars that an intersection is blocked and they should recalculate routes."""
-        print(f"[AMBIENTE] A notificar carros sobre bloqueio em {blocked_intersection_id}")
-        
-        for car_group in self.cars:
-            if car_group.sprites():
-                car = car_group.sprites()[0]
-                if hasattr(car, 'handle_blocked_intersection'):
-                    car.handle_blocked_intersection(blocked_intersection_id)
-        
-        # Also notify emergency vehicles
-        for ecar_group in self.emergency_cars:
-            if ecar_group.sprites():
-                ecar = ecar_group.sprites()[0]
-                if hasattr(ecar, 'handle_blocked_intersection'):
-                    ecar.handle_blocked_intersection(blocked_intersection_id)
+        """Notify all cars that an intersection is blocked and they should recalculate routes.
+        Note: Route recalculation is now handled by agents, not sprites.
+        Agents can check is_intersection_blocked() themselves if needed."""
+        print(f"[AMBIENTE] Cruzamento {blocked_intersection_id} bloqueado - agentes devem verificar rotas")
     
     def _notify_cars_intersection_cleared(self, intersection_id):
-        """Notify all cars that an intersection has been cleared."""
-        print(f"[AMBIENTE] A notificar carros que bloqueio foi removido de {intersection_id}")
-
-        for car_group in self.cars:
-            if car_group.sprites():
-                car = car_group.sprites()[0]
-                if hasattr(car, 'handle_intersection_cleared'):
-                    car.handle_intersection_cleared(intersection_id)
-
-        # Also notify emergency vehicles
-        for ecar_group in self.emergency_cars:
-            if ecar_group.sprites():
-                ecar = ecar_group.sprites()[0]
-                if hasattr(ecar, 'handle_intersection_cleared'):
-                    ecar.handle_intersection_cleared(intersection_id)
+        """Notify all cars that an intersection has been cleared.
+        Note: Route recalculation is now handled by agents, not sprites.
+        Agents can check is_intersection_blocked() themselves if needed."""
+        print(f"[AMBIENTE] Cruzamento {intersection_id} desbloqueado - agentes podem retomar rotas")
 
     def _update_speed_modifier(self):
         """Update speed modifier based on active disruptions."""
@@ -1697,11 +1683,11 @@ class Environment:
                                 (normalized_angle > 135 and normalized_angle < 225))
         
         if is_vertical_movement:
-            # Estradas verticais: reduzir look-ahead porque o rect é alto
-            LOOK_AHEAD_DISTANCE = 5
+            # Estradas verticais: aumentar look-ahead para evitar ultrapassagem
+            LOOK_AHEAD_DISTANCE = 20
         else:
-            # Estradas horizontais: distância normal
-            LOOK_AHEAD_DISTANCE = 15
+            # Estradas horizontais: aumentar distância para evitar ultrapassagem
+            LOOK_AHEAD_DISTANCE = 25
         
         # Calcular ponto de deteção à frente do carro baseado no seu ângulo
         angle_rad = math.radians(car_angle)
@@ -1727,6 +1713,21 @@ class Environment:
             return (True, coll[0].id)
         
         return (False, 0)
+    
+    def is_car_crossing_traffic_light(self, sprite, tl_id):
+        """Check if car is already crossing/inside the traffic light (should continue if yellow)."""
+        if tl_id not in self.traffic_lights_objects:
+            return False
+        
+        tl = self.traffic_lights_objects[tl_id]
+        # Check if car's center is inside or very close to traffic light rect
+        car_center = sprite.rect.center
+        tl_rect = tl.rect
+        
+        # Expand traffic light rect slightly to account for car size
+        expanded_rect = tl_rect.inflate(20, 20)
+        
+        return expanded_rect.collidepoint(car_center)
 
     # processa ciclo de renderização da simulação
     def update_map(self):
@@ -1888,9 +1889,9 @@ class Environment:
         old_pos = self.car_positions.get(car_id)
         self.car_positions[car_id] = (car_pos[0], car_pos[1], car_pos[2])
         
-        # Track position for speed calculation
-        current_time = datetime.now()
-        self.car_position_history[car_id].append((car_pos[0], car_pos[1], current_time))
+        # Track position for speed calculation (use simulation time)
+        current_sim_time = self.simulation_time
+        self.car_position_history[car_id].append((car_pos[0], car_pos[1], current_sim_time))
         
         # Keep only last 10 positions for speed calculation
         if len(self.car_position_history[car_id]) > 10:
@@ -1903,7 +1904,7 @@ class Environment:
         self._check_intersection_passage(car_id, car_pos)
 
     def _update_car_speed(self, car_id):
-        """Calculate car speed based on position history."""
+        """Calculate car speed based on position history (uses simulation time)."""
         history = self.car_position_history[car_id]
         if len(history) >= 2:
             # Calculate speed from last two positions
@@ -1911,6 +1912,7 @@ class Environment:
             pos2 = history[-1]
             
             distance = ((pos2[0] - pos1[0])**2 + (pos2[1] - pos1[1])**2)**0.5
+            # Both timestamps are now simulation_time, so this calculates simulation time difference
             time_diff = (pos2[2] - pos1[2]).total_seconds()
             
             if time_diff > 0:

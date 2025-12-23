@@ -4,7 +4,7 @@ import math
 import random
 import pygame
 from Models.Directions import Directions
-from Models.PathFinding import get_traffic_network, get_pathfinder, get_random_destination, recalculate_route_avoiding_blocked, route_requires_blocked_intersection
+from Models.PathFinding import get_traffic_network, get_pathfinder, get_random_destination
 from Map.RoadMap import get_road_map, Direction, LaneType
 
 # imagens disponíveis para os veículos
@@ -14,6 +14,11 @@ GREEN_CAR = 'Map/Resources/Cars/carro-verde.png'
 YELLOW_CAR = 'Map/Resources/Cars/carro-amarelo.png'
 
 directions_options = [Directions.RIGHT, Directions.LEFT, Directions.FORWARD]
+
+# DEBUG MODE: Force same lane spawning
+DEBUG_MODE_SAME_LANE = False  # Set to True to force all cars to spawn on same lane
+DEBUG_SPAWN_ENTRY_POINT = "south_mid"  # Entry point for debug mode
+DEBUG_SPAWN_TURN = Directions.FORWARD  # Turn direction for debug mode
 
 # Get road map singleton for accurate lane positions
 def get_lane_position(entry_id, turn_direction, road_section=None):
@@ -211,7 +216,40 @@ def _get_unique_route():
                          "west_top", "west_bottom",
                          "east_top", "east_bottom"]
     
-    # Try to find a unique route
+    # DEBUG MODE: Force same lane for all cars
+    if DEBUG_MODE_SAME_LANE:
+        entry_point = DEBUG_SPAWN_ENTRY_POINT
+        destination = get_random_destination(entry_point)
+        print(f"[DEBUG SPAWN] Forcing same lane: {entry_point} -> {destination}")
+        
+        # Calculate actual path for debug mode
+        if entry_point in network.entry_points:
+            _, _, start_node = network.entry_points[entry_point]
+            if destination in network.exit_points:
+                _, _, end_node = network.exit_points[destination]
+                route = pathfinder.find_path(start_node, end_node)
+                
+                if route:
+                    # Force same turn direction in debug mode
+                    angle = _get_angle_for_entry(entry_point)
+                    first_turn = DEBUG_SPAWN_TURN
+                    
+                    # Get the road section
+                    road_section = _get_road_section(entry_point)
+                    
+                    # Calculate spawn position for the appropriate lane
+                    spawn_pos = get_lane_position(entry_point, first_turn, road_section)
+                    
+                    # DEBUG: Print lane selection
+                    lane_names = {Directions.LEFT: "ESQ", Directions.RIGHT: "DIR", Directions.FORWARD: "FRENTE"}
+                    print(f"[DEBUG SPAWN] {entry_point} -> {destination} | 1ª Viragem: {lane_names.get(first_turn, '?')} | Pos: {spawn_pos}")
+                    
+                    # Create spawn tuple: (position, angle, entry_id, first_turn)
+                    spawn = (spawn_pos, angle, entry_point, first_turn)
+                    
+                    return spawn, destination, route
+    
+    # Try to find a unique route (normal mode)
     max_attempts = 20
     for attempt in range(max_attempts):
         entry_point = random.choice(entry_points_list)
@@ -278,26 +316,11 @@ class Car(pygame.sprite.Sprite):
     time_speed = 1
     is_paused = False
     
-    # Track all active car positions for collision avoidance
-    active_cars = []
-    
     @classmethod
     def set_time_speed(cls, speed, paused=False):
         """Set the global time speed for all cars."""
         cls.time_speed = max(1, speed)
         cls.is_paused = paused
-    
-    @classmethod
-    def register_car(cls, car):
-        """Register a car for collision tracking."""
-        if car not in cls.active_cars:
-            cls.active_cars.append(car)
-    
-    @classmethod
-    def unregister_car(cls, car):
-        """Unregister a car from collision tracking."""
-        if car in cls.active_cars:
-            cls.active_cars.remove(car)
     
     def __init__(self, screen, id):
         super().__init__()
@@ -336,6 +359,9 @@ class Car(pygame.sprite.Sprite):
 
         self.car_is_turning = False
         self.car_at_traffic_light = False
+        self.is_car_stopped = False
+        self.is_slowing_down = False  # For gradual slowdown approaching yellow light
+        self.normal_base_speed = 1  # Store normal speed for resuming
 
         self.is_turning = (False, '')
         self.is_switching_lane = (False, '')
@@ -347,12 +373,6 @@ class Car(pygame.sprite.Sprite):
         self.image = pygame.image.load(random.choice([RED_CAR, BLUE_CAR, GREEN_CAR, YELLOW_CAR])).convert_alpha()
         # Use center for accurate positioning on lanes
         self.rect = self.image.get_rect(center=spawning_point[0])
-        
-        # Register for collision tracking
-        Car.register_car(self)
-
-        # Check if any intersections in our route are currently blocked
-        self._check_route_for_blocked_intersections()
 
         self.fires_car()
 
@@ -360,20 +380,6 @@ class Car(pygame.sprite.Sprite):
 
         self.stopped_at_tl_id = False
         self.stopped_at_tl_start_time = False
-        
-        # For collision avoidance and deadlock resolution
-        self.waiting_for_car_ahead = False
-        self.waiting_start_time = None  # When car started waiting
-        self.yielding_to = None  # ID of car we're yielding to
-        self.deadlock_check_counter = 0  # Counter to check deadlock periodically
-        
-        # For accident/blocked intersection handling
-        self.waiting_for_accident = False  # Waiting at traffic light because no alternative route
-        self.blocked_intersection_id = None  # Which intersection is blocking our route
-
-    def __del__(self):
-        """Cleanup when car is destroyed."""
-        Car.unregister_car(self)
 
     def _get_time_multiplier(self):
         """Get the effective time multiplier for movement."""
@@ -409,124 +415,6 @@ class Car(pygame.sprite.Sprite):
             self.passed_intersections.add(current_intersection)
             self.current_route_index += 1
             self._update_next_turn()
-    
-    def handle_blocked_intersection(self, blocked_intersection_id):
-        """Handle notification that an intersection is blocked (accident).
-        
-        If the car hasn't reached that intersection yet, try to recalculate route.
-        If no alternative exists, mark car to wait at the traffic light before that intersection.
-        """
-        # Check if we're already at or past this intersection
-        if blocked_intersection_id in self.passed_intersections:
-            # Already passed it, no need to recalculate
-            return
-        
-        # Check if our remaining route goes through this intersection
-        remaining_route = self.route[self.current_route_index:]
-        if blocked_intersection_id not in remaining_route:
-            # Our route doesn't go through the blocked intersection
-            return
-        
-        print(f"[CARRO {self.id}] A rota passa pelo cruzamento bloqueado {blocked_intersection_id}")
-        
-        # Determine current intersection (or the one we're heading to)
-        if self.current_route_index < len(self.route):
-            current_node = self.route[self.current_route_index]
-        else:
-            # Already at last intersection, can't recalculate
-            return
-        
-        # Skip if current node IS the blocked one (we're already there)
-        if current_node == blocked_intersection_id:
-            print(f"[CARRO {self.id}] Já está no cruzamento bloqueado, a parar")
-            self.waiting_for_accident = True
-            self.blocked_intersection_id = blocked_intersection_id
-            self.stop_car()
-            return
-        
-        # Try to find alternative route
-        new_route = recalculate_route_avoiding_blocked(current_node, self.destination)
-        
-        if new_route is not None and len(new_route) > 0:
-            # Found alternative route!
-            old_route = ' -> '.join(self.route[self.current_route_index:])
-            new_route_str = ' -> '.join(new_route)
-            print(f"[CARRO {self.id}] Nova rota encontrada: {new_route_str} (antes: {old_route})")
-            
-            # Update the route from current position
-            self.route = self.route[:self.current_route_index] + new_route
-            self._update_next_turn()
-            self.waiting_for_accident = False
-            self.blocked_intersection_id = None
-        else:
-            # No alternative route - must wait at traffic light until accident clears
-            print(f"[CARRO {self.id}] Sem rota alternativa, vai esperar no semáforo")
-            self.waiting_for_accident = True
-            self.blocked_intersection_id = blocked_intersection_id
-    
-    def handle_intersection_cleared(self, intersection_id):
-        """Handle notification that a previously blocked intersection is now clear."""
-        # If this car was waiting for this intersection to clear, resume it
-        if self.blocked_intersection_id == intersection_id:
-            print(f"[CARRO {self.id}] Cruzamento {intersection_id} desbloqueado, a retomar rota")
-            self.waiting_for_accident = False
-            self.blocked_intersection_id = None
-            self.fires_car()
-        # Also check if car is currently waiting for any accident
-        elif self.waiting_for_accident:
-            # Check if the route is now clear
-            if not self._is_route_blocked():
-                print(f"[CARRO {self.id}] Rota agora livre após limpeza de {intersection_id}, a retomar")
-                self.waiting_for_accident = False
-                self.blocked_intersection_id = None
-                self.fires_car()
-    
-    def clear_waiting_for_accident(self):
-        """Clear the waiting for accident state (used when all disruptions are cleared)."""
-        if self.waiting_for_accident:
-            print(f"[CARRO {self.id}] Todas as perturbações limpas, a retomar")
-            self.waiting_for_accident = False
-            self.blocked_intersection_id = None
-            self.fires_car()
-
-    def is_at_blocked_intersection(self):
-        """Check if the car is currently at a blocked intersection."""
-        pathfinder = get_pathfinder()
-
-        # Check if current intersection (next in route) is blocked
-        if self.current_route_index < len(self.route):
-            next_intersection = self.route[self.current_route_index]
-            if pathfinder.is_intersection_blocked(next_intersection):
-                return True
-
-        return False
-
-    def _is_route_blocked(self):
-        """Check if any intersection in the remaining route is blocked."""
-        pathfinder = get_pathfinder()
-
-        # Check remaining route for blocked intersections
-        for i in range(self.current_route_index, len(self.route)):
-            intersection_id = self.route[i]
-            if pathfinder.is_intersection_blocked(intersection_id):
-                return True
-
-        return False
-
-    def _check_route_for_blocked_intersections(self):
-        """Check if any intersections in the current route are blocked and try to recalculate."""
-        if not self.route:
-            return
-
-        pathfinder = get_pathfinder()
-
-        # Check remaining route for blocked intersections
-        for i in range(self.current_route_index, len(self.route)):
-            intersection_id = self.route[i]
-            if pathfinder.is_intersection_blocked(intersection_id):
-                # Found a blocked intersection - try to recalculate route
-                self.handle_blocked_intersection(intersection_id)
-                break  # Only handle one blocked intersection at a time
 
     def set_car_at_tl(self, flag=True):
         self.car_at_traffic_light = flag
@@ -543,115 +431,42 @@ class Car(pygame.sprite.Sprite):
     def infinite_car(self):
         """Remove car when it leaves the map."""
         if self.rect.x < -100 or self.rect.x > 1400 or self.rect.y > 850 or self.rect.y < -100:
-            Car.unregister_car(self)
+            pass  # Cleanup handled by agent
 
     def fires_car(self, speed=1):
+        self.is_car_stopped = False
+        self.is_slowing_down = False
         self.base_speed = speed
+        self.normal_base_speed = speed
         self.car_speed = speed * self._get_time_multiplier()
 
     def stop_car(self):
+        self.is_car_stopped = True
+        self.is_slowing_down = False
         self.base_speed = 0
         self.car_speed = 0
 
-    def check_car_ahead(self):
-        """Check if there's another car directly ahead in the SAME LANE.
-        Cars in different lanes (side by side) should NOT block each other.
-        Returns: (blocking_car, is_intersection_conflict) or (None, False)"""
-        my_x, my_y, my_angle = self.get_car_position()
-        
-        # Normalize angle
-        angle_norm = my_angle % 360
-        if angle_norm < 0:
-            angle_norm += 360
-        
-        min_distance = 55  # Minimum safe distance
-        same_lane_tolerance = 15  # Strict tolerance - only cars in SAME lane
-        
-        for other_car in Car.active_cars:
-            if other_car is self:
-                continue
-            
-            # Skip if we're yielding to this car
-            if self.yielding_to == other_car.id:
-                continue
-            
-            other_x, other_y, other_angle = other_car.get_car_position()
-            
-            # Check if other car is going in a SIMILAR direction (same lane)
-            # Cars going opposite directions are in different lanes
-            other_angle_norm = other_angle % 360
-            if other_angle_norm < 0:
-                other_angle_norm += 360
-            
-            angle_diff = abs(angle_norm - other_angle_norm)
-            if angle_diff > 180:
-                angle_diff = 360 - angle_diff
-            
-            # Only consider cars going in roughly the same direction (within 45 degrees)
-            # This allows cars in opposite lanes to be side by side
-            if angle_diff > 45:
-                continue
-            
-            # Calculate distance
-            dx = other_x - my_x
-            dy = other_y - my_y
-            distance = math.sqrt(dx*dx + dy*dy)
-            
-            if distance > min_distance or distance < 5:
-                continue
-            
-            # Check if car is ahead based on our direction (strict same-lane check)
-            is_ahead = False
-            if 315 <= angle_norm or angle_norm < 45:  # Going up (north)
-                is_ahead = dy < 0 and abs(dx) < same_lane_tolerance
-            elif 45 <= angle_norm < 135:  # Going left (west)
-                is_ahead = dx < 0 and abs(dy) < same_lane_tolerance
-            elif 135 <= angle_norm < 225:  # Going down (south)
-                is_ahead = dy > 0 and abs(dx) < same_lane_tolerance
-            elif 225 <= angle_norm < 315:  # Going right (east)
-                is_ahead = dx > 0 and abs(dy) < same_lane_tolerance
-            
-            if is_ahead:
-                # Check if this is a potential deadlock (other car is also waiting)
-                is_intersection_conflict = (
-                    hasattr(other_car, 'waiting_for_car_ahead') and 
-                    other_car.waiting_for_car_ahead and
-                    distance < 45  # Very close - likely at intersection
-                )
-                return (other_car, is_intersection_conflict)
-        
-        return (None, False)
-    
-    def should_yield_to(self, other_car):
-        """Determine if this car should yield to another car in a deadlock.
-        Uses deterministic rules: lower ID yields to higher ID."""
-        if other_car is None:
-            return False
-        
-        # If other car is yielding to us, don't yield back
-        if hasattr(other_car, 'yielding_to') and other_car.yielding_to == self.id:
-            return False
-        
-        # Compare IDs - lower ID yields to higher ID
-        try:
-            my_id_num = int(''.join(filter(str.isdigit, str(self.id))) or '0')
-            other_id_num = int(''.join(filter(str.isdigit, str(other_car.id))) or '0')
-            return my_id_num < other_id_num
-        except:
-            # Fallback to string comparison
-            return str(self.id) < str(other_car.id)
-    
-    def resolve_deadlock(self, blocking_car):
-        """Resolve a deadlock situation by having one car yield."""
-        if self.should_yield_to(blocking_car):
-            # We should yield - stop and let the other car pass
-            self.yielding_to = blocking_car.id
-            self.stop_car()
-            return True
-        else:
-            # Other car should yield - we can continue
-            self.yielding_to = None
-            return False
+    def slow_down(self, target_speed_factor=0.5):
+        """Gradually slow down (e.g., when approaching yellow light).
+        target_speed_factor: 0.0 = stop, 1.0 = normal speed, 0.5 = half speed"""
+        if not self.is_car_stopped:
+            self.is_slowing_down = True
+            target_speed = self.normal_base_speed * target_speed_factor
+            # Gradual slowdown: reduce speed by 5% each frame until target (slower reduction)
+            if self.base_speed > target_speed:
+                self.base_speed = max(target_speed, self.base_speed * 0.95)
+            # If already at target speed, don't keep reducing
+            elif self.base_speed < target_speed:
+                # Speed up slightly if below target (shouldn't happen, but safety check)
+                self.base_speed = min(target_speed, self.base_speed * 1.05)
+            self.car_speed = self.base_speed * self._get_time_multiplier()
+
+    def resume_normal_speed(self):
+        """Resume normal speed after slowdown or when light turns green."""
+        self.is_slowing_down = False
+        self.is_car_stopped = False
+        self.base_speed = self.normal_base_speed
+        self.car_speed = self.base_speed * self._get_time_multiplier()
 
     def go_forward(self):
         if Car.is_paused:
@@ -899,50 +714,11 @@ class Car(pygame.sprite.Sprite):
         self.screen.blit(rotated_image, self.rect.topleft)
 
     def update(self):
+        """Update method - only handles physics (turning, lane switching, forward movement).
+        Collision detection and decision-making is handled by the agent."""
         if Car.is_paused:
             return
 
-        # Check for car ahead to avoid collision
-        if not self.is_turning[0] and not self.is_switching_lane[0]:
-            blocking_car, is_intersection_conflict = self.check_car_ahead()
-            
-            if blocking_car is not None:
-                # There's a car ahead
-                if is_intersection_conflict:
-                    # Potential deadlock - check periodically for resolution
-                    self.deadlock_check_counter += 1
-                    
-                    if self.deadlock_check_counter >= 30:  # Check every ~30 frames
-                        self.deadlock_check_counter = 0
-                        
-                        # Try to resolve the deadlock
-                        if self.resolve_deadlock(blocking_car):
-                            # We're yielding - stay stopped
-                            self.waiting_for_car_ahead = True
-                            self.stop_car()
-                            return
-                        else:
-                            # Other car should yield - we can try to move
-                            self.waiting_for_car_ahead = False
-                            self.yielding_to = None
-                            self.fires_car()
-                    else:
-                        # Keep waiting while counter builds up
-                        self.waiting_for_car_ahead = True
-                        self.stop_car()
-                        return
-                else:
-                    # Regular blocking - just wait
-                    self.waiting_for_car_ahead = True
-                    self.yielding_to = None
-                    self.stop_car()
-                    return
-            else:
-                # No car ahead - clear yielding state
-                self.waiting_for_car_ahead = False
-                self.yielding_to = None
-                self.deadlock_check_counter = 0
-            
         if self.is_turning[0]:
             self.handle_turning()
         elif self.is_switching_lane[0]:

@@ -31,8 +31,10 @@ async def main():
 
     # Cria e inicia o agente central (MapUpdater)
     print("[SETUP] Iniciando agente central (MapUpdater)...")
-    num_initial_cars = 30  # Número de carros iniciais (aumentado)
-    map_updater = MapUpdaterAgent("central@localhost", "pass", environment, initial_car_count=num_initial_cars)
+    # DEBUG MODE: Only spawn 2 cars on the same lane
+    DEBUG_MODE = False  # Set to False to disable debug mode
+    num_initial_cars = 2 if DEBUG_MODE else 30  # Número de carros iniciais (aumentado)
+    map_updater = MapUpdaterAgent("central@localhost", "pass", environment, initial_car_count=num_initial_cars, debug_mode=DEBUG_MODE)
     await map_updater.start(auto_register=True)
     
     # Cria e inicia o Chaos Agent (gerencia perturbações automaticamente)
@@ -247,12 +249,12 @@ async def main():
     # Cria e inicia agentes semáforos com offsets diferentes
     print("[SETUP] Iniciando agentes de semáforos com FIPA Request e Subscribe Protocols...")
     tl_agents = [
-        TrafficLightAgent("semaforos_1@localhost", "pass", tl_1_disposition, environment, offset_seconds=0),
-        TrafficLightAgent("semaforos_2@localhost", "pass", tl_2_disposition, environment, offset_seconds=2),
-        TrafficLightAgent("semaforos_3@localhost", "pass", tl_3_disposition, environment, offset_seconds=4),
-        TrafficLightAgent("semaforos_4@localhost", "pass", tl_4_disposition, environment, offset_seconds=5),
-        TrafficLightAgent("semaforos_5@localhost", "pass", tl_5_disposition, environment, offset_seconds=7),
-        TrafficLightAgent("semaforos_6@localhost", "pass", tl_6_disposition, environment, offset_seconds=9),
+        TrafficLightAgent("semaforos_1@localhost", "pass", tl_1_disposition, environment, offset_seconds=0, debug_mode=DEBUG_MODE),
+        TrafficLightAgent("semaforos_2@localhost", "pass", tl_2_disposition, environment, offset_seconds=2, debug_mode=DEBUG_MODE),
+        TrafficLightAgent("semaforos_3@localhost", "pass", tl_3_disposition, environment, offset_seconds=4, debug_mode=DEBUG_MODE),
+        TrafficLightAgent("semaforos_4@localhost", "pass", tl_4_disposition, environment, offset_seconds=5, debug_mode=DEBUG_MODE),
+        TrafficLightAgent("semaforos_5@localhost", "pass", tl_5_disposition, environment, offset_seconds=7, debug_mode=DEBUG_MODE),
+        TrafficLightAgent("semaforos_6@localhost", "pass", tl_6_disposition, environment, offset_seconds=9, debug_mode=DEBUG_MODE),
     ]
 
     for tl in tl_agents:
@@ -260,6 +262,16 @@ async def main():
 
     # Cria e inicia agentes carros (com FIPA Subscribe Protocol)
     print("[SETUP] Iniciando agentes de carros com FIPA Subscribe Protocol...")
+    # Ensure debug flags are disabled
+    import Map.Car as CarModule
+    CarModule.DEBUG_MODE_SAME_LANE = False
+    
+    if DEBUG_MODE:
+        print("[DEBUG MODE] Spawning only 2 cars on the same lane...")
+        # Enable debug mode in Car.py to force same lane
+        CarModule.DEBUG_MODE_SAME_LANE = True
+        print("[DEBUG MODE] Same lane spawning enabled in Car.py")
+    
     for x in range(num_initial_cars):
         car = CarAgent(f"carro_{x}@localhost", "pass", environment)
         await car.start(auto_register=True)

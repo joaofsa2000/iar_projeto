@@ -11,7 +11,7 @@ from Models.Directions import Directions
 from Map.Car import (Car, get_lane_position, _get_first_turn_for_route, 
                      _get_road_section, _get_angle_for_entry, _calculate_turn_direction)
 from Map.RoadMap import get_road_map
-from Models.PathFinding import get_traffic_network, get_pathfinder, get_random_destination, recalculate_route_avoiding_blocked
+from Models.PathFinding import get_traffic_network, get_pathfinder, get_random_destination
 
 AMBULANCE = ['Map/Resources/Cars/ambulancia-1.png', 'Map/Resources/Cars/ambulancia-2.png']
 POLICE = ['Map/Resources/Cars/policia-1.png', 'Map/Resources/Cars/policia-2.png']
@@ -81,17 +81,10 @@ class EmergencyCar(pygame.sprite.Sprite):
         self.turning_rotation_done = 0
         self.stopped_at_tl_id = False
         self.stopped_at_tl_start_time = False
-        
-        # For accident/blocked intersection handling
-        self.waiting_for_accident = False
-        self.blocked_intersection_id = None
 
         # Load sprite - use center for accurate lane positioning
         self.image = pygame.image.load(self.car_type[self.get_next_animation_index()]).convert_alpha()
         self.rect = self.image.get_rect(center=spawn_pos)
-
-        # Check if any intersections in our route are currently blocked
-        self._check_route_for_blocked_intersections()
 
         # Start moving
         self.fires_car(speed=1)
@@ -144,88 +137,6 @@ class EmergencyCar(pygame.sprite.Sprite):
             self.passed_intersections.add(current_intersection)
             self.current_route_index += 1
             self._update_next_turn()
-    
-    def handle_blocked_intersection(self, blocked_intersection_id):
-        """Handle notification that an intersection is blocked.
-        Emergency vehicles try to find alternative routes like regular cars."""
-        # Check if we're already at or past this intersection
-        if blocked_intersection_id in self.passed_intersections:
-            return
-        
-        # Check if our remaining route goes through this intersection
-        remaining_route = self.route[self.current_route_index:]
-        if blocked_intersection_id not in remaining_route:
-            return
-        
-        car_type_name = "AMBULÂNCIA" if self.car_type == AMBULANCE else "POLÍCIA"
-        print(f"[{car_type_name} {self.id}] A rota passa pelo cruzamento bloqueado {blocked_intersection_id}")
-        
-        # Determine current intersection
-        if self.current_route_index < len(self.route):
-            current_node = self.route[self.current_route_index]
-        else:
-            return
-        
-        # Skip if current node IS the blocked one
-        if current_node == blocked_intersection_id:
-            print(f"[{car_type_name} {self.id}] Já está no cruzamento bloqueado, a parar")
-            self.waiting_for_accident = True
-            self.blocked_intersection_id = blocked_intersection_id
-            self.stop_car()
-            return
-        
-        # Try to find alternative route
-        new_route = recalculate_route_avoiding_blocked(current_node, self.destination)
-        
-        if new_route is not None and len(new_route) > 0:
-            print(f"[{car_type_name} {self.id}] Nova rota encontrada!")
-            self.route = self.route[:self.current_route_index] + new_route
-            self._update_next_turn()
-            self.waiting_for_accident = False
-            self.blocked_intersection_id = None
-        else:
-            print(f"[{car_type_name} {self.id}] Sem rota alternativa, vai esperar")
-            self.waiting_for_accident = True
-            self.blocked_intersection_id = blocked_intersection_id
-    
-    def handle_intersection_cleared(self, intersection_id):
-        """Handle notification that a blocked intersection is now clear."""
-        if self.waiting_for_accident and self.blocked_intersection_id == intersection_id:
-            car_type_name = "AMBULÂNCIA" if self.car_type == AMBULANCE else "POLÍCIA"
-            print(f"[{car_type_name} {self.id}] Cruzamento desbloqueado, a retomar")
-            self.waiting_for_accident = False
-            self.blocked_intersection_id = None
-            self.fires_car()
-    
-    def clear_waiting_for_accident(self):
-        """Clear waiting state when all disruptions cleared."""
-        if self.waiting_for_accident:
-            car_type_name = "AMBULÂNCIA" if self.car_type == AMBULANCE else "POLÍCIA"
-            print(f"[{car_type_name} {self.id}] Perturbações limpas, a retomar")
-            self.waiting_for_accident = False
-            self.blocked_intersection_id = None
-            self.fires_car()
-    
-    def is_at_blocked_intersection(self):
-        """Check if the car is currently at a blocked intersection."""
-        if self.current_route_index < len(self.route):
-            next_intersection = self.route[self.current_route_index]
-            if self.pathfinder.is_intersection_blocked(next_intersection):
-                return True
-        return False
-
-    def _check_route_for_blocked_intersections(self):
-        """Check if any intersections in the current route are blocked and try to recalculate."""
-        if not self.route:
-            return
-
-        # Check remaining route for blocked intersections
-        for i in range(self.current_route_index, len(self.route)):
-            intersection_id = self.route[i]
-            if self.pathfinder.is_intersection_blocked(intersection_id):
-                # Found a blocked intersection - try to recalculate route
-                self.handle_blocked_intersection(intersection_id)
-                break  # Only handle one blocked intersection at a time
 
     def set_car_at_tl(self, flag=True):
         self.car_at_traffic_light = flag
@@ -478,7 +389,8 @@ class EmergencyCar(pygame.sprite.Sprite):
         self.screen.blit(rotated_image, self.rect.topleft)
 
     def update(self):
-        """Update method - same structure as Car but no collision avoidance."""
+        """Update method - only handles physics (turning, forward movement).
+        Decision-making is handled by the agent."""
         if Car.is_paused:
             return
 
@@ -487,10 +399,6 @@ class EmergencyCar(pygame.sprite.Sprite):
         else:
             # Emergency vehicles just go forward, don't do lane switching
             self.go_forward()
-
-        # Check if car left the map
-        if self.rect.x < -100 or self.rect.x > 1400 or self.rect.y > 850 or self.rect.y < -100:
-            pass  # Will be handled by agent
 
     def get_next_animation_index(self):
         """Animate siren lights."""

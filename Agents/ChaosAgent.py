@@ -53,15 +53,15 @@ class ChaosAgent(Agent):
         # (to coordinate with manual controls)
         self.managed_intersections = set()
         
-        # Minimum time between spawning perturbations at the same intersection
-        self.min_time_between_spawns = timedelta(seconds=30)  # 30 seconds minimum
-        self.last_spawn_times = {}  # {intersection_id: datetime}
+        # Minimum time between spawning perturbations at the same intersection (in simulation time)
+        self.min_time_between_spawns = timedelta(seconds=30)  # 30 seconds minimum (simulation time)
+        self.last_spawn_times = {}  # {intersection_id: simulation_time}
 
     async def setup(self):
         print(f"[CHAOS AGENT {self.jid}] Agente iniciado")
-        print(f"[CHAOS AGENT] Probabilidades: Acidente={self.disruption_weights[DisruptionType.ACCIDENT]/self.total_weight*100:.1f}%, "
-              f"Obras={self.disruption_weights[DisruptionType.CONSTRUCTION]/self.total_weight*100:.1f}%, "
-              f"Estrada Cortada={self.disruption_weights[DisruptionType.ROAD_CLOSURE]/self.total_weight*100:.1f}%")
+        # print(f"[CHAOS AGENT] Probabilidades: Acidente={self.disruption_weights[DisruptionType.ACCIDENT]/self.total_weight*100:.1f}%, "
+        #       f"Obras={self.disruption_weights[DisruptionType.CONSTRUCTION]/self.total_weight*100:.1f}%, "
+        #       f"Estrada Cortada={self.disruption_weights[DisruptionType.ROAD_CLOSURE]/self.total_weight*100:.1f}%")
 
         # Main behavior: periodically check and manage perturbations
         class PerturbationManagementBehaviour(PeriodicBehaviour):
@@ -92,12 +92,12 @@ class ChaosAgent(Agent):
                             # Manual trigger - remove from managed set if it was managed
                             if intersection_id in self.agent.managed_intersections:
                                 self.agent.managed_intersections.discard(intersection_id)
-                                print(f"[CHAOS AGENT] Intersecção {intersection_id} agora gerida manualmente")
+                                # print(f"[CHAOS AGENT] Intersecção {intersection_id} agora gerida manualmente")
                         elif action == "manual_clear":
                             # Manual clear - can be managed again
                             if intersection_id in self.agent.managed_intersections:
                                 self.agent.managed_intersections.discard(intersection_id)
-                                print(f"[CHAOS AGENT] Intersecção {intersection_id} limpa manualmente, pode ser gerida novamente")
+                                # print(f"[CHAOS AGENT] Intersecção {intersection_id} limpa manualmente, pode ser gerida novamente")
 
         template = Template()
         template.set_metadata("protocol", "chaos-coordination")
@@ -129,7 +129,7 @@ class ChaosAgent(Agent):
                     self.managed_intersections.discard(intersection_id)
                     disruption_pt = self.environment.get_disruption_label(disruption_type)
                     intersection_pt = self.environment.get_intersection_name(intersection_id)
-                    print(f"[CHAOS AGENT] Limpou {disruption_pt} em {intersection_pt}")
+                    # print(f"[CHAOS AGENT] Limpou {disruption_pt} em {intersection_pt}")
 
     async def _spawn_new_perturbations(self):
         """Spawn new perturbations based on probability."""
@@ -166,9 +166,10 @@ class ChaosAgent(Agent):
         # Select a random available intersection
         selected_intersection = random.choice(available_intersections)
         
-        # Check minimum time between spawns for this intersection
+        # Check minimum time between spawns for this intersection (use simulation time)
+        current_sim_time = self.environment.simulation_time
         if selected_intersection in self.last_spawn_times:
-            time_since_last = datetime.now() - self.last_spawn_times[selected_intersection]
+            time_since_last = current_sim_time - self.last_spawn_times[selected_intersection]
             if time_since_last < self.min_time_between_spawns:
                 # Too soon to spawn again at this intersection
                 return
@@ -185,10 +186,10 @@ class ChaosAgent(Agent):
         
         if success:
             self.managed_intersections.add(selected_intersection)
-            self.last_spawn_times[selected_intersection] = datetime.now()
+            self.last_spawn_times[selected_intersection] = current_sim_time
             disruption_pt = self.environment.get_disruption_label(disruption_type)
             intersection_pt = self.environment.get_intersection_name(selected_intersection)
-            print(f"[CHAOS AGENT] Spawned {disruption_pt} em {intersection_pt}")
+            # print(f"[CHAOS AGENT] Spawned {disruption_pt} em {intersection_pt}")
 
     def _select_disruption_type(self):
         """Select a disruption type based on probability weights."""

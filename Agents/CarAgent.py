@@ -12,6 +12,7 @@ from spade.message import Message
 from spade.template import Template
 
 from Models.LightStatus import LightStatus
+from Models.Directions import Directions
 from Data.MetricsManager import get_metrics_manager
 
 
@@ -72,16 +73,14 @@ class CarAgent(Agent):
                     # Remove from cars list
                     if self.car in self.env.cars:
                         self.env.cars.remove(self.car)
-                    print(f"[CARRO {self.agent.jid}] Saiu do mapa - agente parado")
+                    # print(f"[CARRO {self.agent.jid}] Saiu do mapa - agente parado")
                     await self.agent.stop()
                     return
                 
-                # Verifica colisões com outros carros
+                # 1. Verificar colisão (AGENTE decide)
                 collision_result = await self.is_colliding()
-                if not collision_result:
-                    await self.move()
-                    self.env.update_car_position(self.id, car_sprite.get_car_position())
-                else:
+                if collision_result:
+                    # Colisão detectada - parar o carro
                     car_sprite.stop_car()
                     # If car inherited stopped_at_tl_id from collision, ensure it's tracked
                     if hasattr(self.car, 'stopped_at_tl_id') and self.car.stopped_at_tl_id:
@@ -90,44 +89,94 @@ class CarAgent(Agent):
                         # Start tracking waiting time if not already tracking
                         if self.id not in self.env.car_waiting_start_times:
                             self.env.start_car_waiting(self.id)
-
-                car_sprite.update()
+                    # Não mover - aguardar próxima iteração
+                    return
+                
+                # 2. Decidir movimento (AGENTE decide)
+                await self.move()  # Verifica semáforos, etc.
+                
+                # 3. Executar física (SPRITE executa)
+                if car_sprite.is_turning[0]:
+                    car_sprite.handle_turning()
+                elif car_sprite.is_switching_lane[0]:
+                    car_sprite.switch_lane(car_sprite.is_switching_lane[1])
+                elif not car_sprite.is_car_stopped:
+                    car_sprite.go_forward()
+                
+                # 4. Atualizar posição no ambiente
+                self.env.update_car_position(self.id, car_sprite.get_car_position())
 
             async def move(self):
-                is_tl_collided, tl_id = self.env.collision_traffic_light(self.car.sprites()[0])
+                car_sprite = self.car.sprites()[0]
+                is_tl_collided, tl_id = self.env.collision_traffic_light(car_sprite)
 
                 # Get traffic light status
                 tl_status = self.env.get_traffic_light_status(tl_id) if is_tl_collided else None
                 
-                # Semáforo vermelho ou amarelo -> carro parado
-                should_stop = is_tl_collided and tl_status in [LightStatus.RED, LightStatus.YELLOW]
-                
-                if should_stop:
-                    self.car.sprites()[0].stop_car()
-                    self.car.stopped_at_tl_id = tl_id
-                    self.car.stopped_at_tl_start_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    await self.set_cars_at_traffic_light(tl_id)
-                    
-                    # Start tracking waiting time for visual timer
-                    self.env.start_car_waiting(self.id)
-
-                    # Track waiting time for green light request
-                    if self.agent.waiting_start_time is None:
-                        self.agent.waiting_start_time = datetime.now()
-                    
-                    # Check if we should request green light (only for red, not yellow)
+                # Handle different traffic light states
+                if is_tl_collided:
                     if tl_status == LightStatus.RED:
+                        # Red light - always stop
+                        car_sprite.stop_car()
+                        self.car.stopped_at_tl_id = tl_id
+                        # Store simulation time instead of real time
+                        self.car.stopped_at_tl_start_time = self.env.simulation_time.strftime("%Y-%m-%d %H:%M:%S")
+                        await self.set_cars_at_traffic_light(tl_id)
+                        
+                        # Start tracking waiting time for visual timer
+                        self.env.start_car_waiting(self.id)
+
+                        # Track waiting time for green light request (use simulation time)
+                        if self.agent.waiting_start_time is None:
+                            self.agent.waiting_start_time = self.env.simulation_time
+                        
                         await self.check_and_request_green(tl_id)
 
-                    # FIPA SUBSCRIBE PROTOCOL - Subscreve ao semáforo se ainda não subscreveu
-                    # Cancela subscrição anterior se mudou de semáforo
-                    if self.agent.current_traffic_light and self.agent.current_traffic_light != tl_id:
-                        await self.cancel_subscription(self.agent.current_traffic_light)
+                        # FIPA SUBSCRIBE PROTOCOL
+                        if self.agent.current_traffic_light and self.agent.current_traffic_light != tl_id:
+                            await self.cancel_subscription(self.agent.current_traffic_light)
 
-                    if self.agent.current_traffic_light != tl_id:
-                        await self.subscribe_to_traffic_light(tl_id)
-                        self.agent.current_traffic_light = tl_id
-                else:
+                        if self.agent.current_traffic_light != tl_id:
+                            await self.subscribe_to_traffic_light(tl_id)
+                            self.agent.current_traffic_light = tl_id
+                    
+                    elif tl_status == LightStatus.YELLOW:
+                        # Yellow light - check if already crossing
+                        is_crossing = self.env.is_car_crossing_traffic_light(car_sprite, tl_id)
+                        
+                        if is_crossing:
+                            # Already crossing - continue at normal speed
+                            car_sprite.resume_normal_speed()
+                        else:
+                            # Not yet crossing - gradual slowdown (only if not already slowing down enough)
+                            # Only slow down if current speed is above target
+                            target_speed = car_sprite.normal_base_speed * 0.5  # Slow down to 50% speed
+                            if car_sprite.base_speed > target_speed:
+                                car_sprite.slow_down(target_speed_factor=0.5)  # Slow down to 50% speed
+                            # If already at target speed, maintain it (don't keep calling slow_down)
+                    
+                    elif tl_status == LightStatus.GREEN:
+                        # Green light - resume normal speed and ensure car moves
+                        car_sprite.resume_normal_speed()
+                        # Clear stopped at traffic light flag when green
+                        if hasattr(self.car, 'stopped_at_tl_id') and self.car.stopped_at_tl_id:
+                            # Record waiting time before clearing
+                            await self.set_cars_stopped_times()
+                            self.car.stopped_at_tl_id = False
+                        # Remove from cars_stopped_at_tl
+                        if tl_id in self.env.cars_stopped_at_tl and self.id in self.env.cars_stopped_at_tl[tl_id]:
+                            self.env.cars_stopped_at_tl[tl_id].remove(self.id)
+                        # Stop tracking waiting time
+                        self.env.stop_car_waiting(self.id)
+                        # Reset waiting time tracking
+                        self.agent.waiting_start_time = None
+                        self.agent.green_request_sent = False
+                
+                # If no traffic light collision, resume normal speed (car passed the light)
+                if not is_tl_collided:
+                    # Resume normal speed if was slowing down
+                    car_sprite.resume_normal_speed()
+                    
                     # Cancelar subscrição anterior se mudou de semáforo
                     if self.agent.current_traffic_light and not is_tl_collided:
                         await self.cancel_subscription(self.agent.current_traffic_light)
@@ -180,7 +229,8 @@ class CarAgent(Agent):
                     return
 
                 if self.agent.waiting_start_time:
-                    waiting_duration = (datetime.now() - self.agent.waiting_start_time).total_seconds()
+                    # Use simulation time instead of real time
+                    waiting_duration = (self.env.simulation_time - self.agent.waiting_start_time).total_seconds()
 
                     if waiting_duration >= GREEN_REQUEST_THRESHOLD:
                         # Check if the red light is due to an accident
@@ -190,11 +240,12 @@ class CarAgent(Agent):
                             intersection_id = self._get_intersection_from_traffic_light(tl_id)
                             if intersection_id and self.env.is_intersection_blocked(intersection_id):
                                 # Don't request green for accidents - just wait
-                                print(f"[CARRO {self.agent.jid}] Semáforo vermelho por acidente em {intersection_id} - aguardando")
+                                # print(f"[CARRO {self.agent.jid}] Semáforo vermelho por acidente em {intersection_id} - aguardando")
                                 return
 
                         await self.request_green_light(tl_id)
                         self.agent.green_request_sent = True
+                        # print(f"[CAR {self.agent.jid}] REQUEST GREEN enviado para {tl_jid} (esperando há mais de {GREEN_REQUEST_THRESHOLD}s)")
 
             def _get_intersection_from_traffic_light(self, tl_id):
                 """Extract intersection ID from traffic light ID."""
@@ -226,7 +277,7 @@ class CarAgent(Agent):
                 
                 await self.send(msg)
                 self.agent.pending_green_requests[conv_id] = tl_jid
-                print(f"[CAR {self.agent.jid}] REQUEST GREEN enviado para {tl_jid} (esperando há mais de {GREEN_REQUEST_THRESHOLD}s)")
+                # print(f"[CAR {self.agent.jid}] REQUEST GREEN enviado para {tl_jid} (esperando há mais de {GREEN_REQUEST_THRESHOLD}s)")
 
             async def subscribe_to_traffic_light(self, tl_id):
                 """Subscreve ao semáforo usando FIPA Subscribe Protocol"""
@@ -240,7 +291,7 @@ class CarAgent(Agent):
                 msg.body = f"CAR_SUBSCRIBE: Car {self.id} wants status updates from {tl_id}"
 
                 await self.send(msg)
-                print(f"[CAR {self.agent.jid}] SUBSCRIBE enviado para {tl_jid}")
+                # print(f"[CAR {self.agent.jid}] SUBSCRIBE enviado para {tl_jid}")
 
             async def cancel_subscription(self, tl_id):
                 """Cancela subscrição ao semáforo"""
@@ -257,7 +308,7 @@ class CarAgent(Agent):
 
                     await self.send(msg)
                     del self.agent.subscribed_traffic_lights[tl_jid]
-                    print(f"[CAR {self.agent.jid}] CANCEL enviado para {tl_jid}")
+                    # print(f"[CAR {self.agent.jid}] CANCEL enviado para {tl_jid}")
 
             async def set_cars_stopped_times(self):
                 # Use simulation time from environment instead of real time
@@ -265,33 +316,45 @@ class CarAgent(Agent):
                 
                 # get_car_waiting_time returns None if car is not waiting, or elapsed seconds if waiting
                 if wait_seconds is not None and wait_seconds > 0:
-                    # Format as HH:MM:SS for display
-                    hours = int(wait_seconds // 3600)
-                    minutes = int((wait_seconds % 3600) // 60)
-                    seconds = int(wait_seconds % 60)
-                    difference = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+                    # Get traffic light ID - check both car group and sprite
+                    tl_id = None
+                    if hasattr(self.car, 'stopped_at_tl_id') and self.car.stopped_at_tl_id:
+                        tl_id = self.car.stopped_at_tl_id
+                    elif self.car.sprites():
+                        car_sprite = self.car.sprites()[0]
+                        if hasattr(car_sprite, 'stopped_at_tl_id') and car_sprite.stopped_at_tl_id:
+                            tl_id = car_sprite.stopped_at_tl_id
                     
-                    self.env.cars_stopped_times.append(
-                        (self.car.stopped_at_tl_id, self.car.sprites()[0].id, difference))
+                    if tl_id:
+                        # Format as HH:MM:SS for display
+                        hours = int(wait_seconds // 3600)
+                        minutes = int((wait_seconds % 3600) // 60)
+                        seconds = int(wait_seconds % 60)
+                        difference = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+                        
+                        self.env.cars_stopped_times.append(
+                            (tl_id, self.car.sprites()[0].id, difference))
+                        
+                        # Record to metrics manager for ML training
+                        try:
+                            # Get intersection from traffic light ID
+                            tl_id_str = str(tl_id)
+                            intersection_id = "_".join(tl_id_str.split("_")[:2]) if "_" in tl_id_str else "unknown"
+                            
+                            metrics = get_metrics_manager()
+                            metrics.record_waiting_time(
+                                sim_time=self.env.simulation_time,
+                                car_id=str(self.car.sprites()[0].id),
+                                traffic_light_id=tl_id_str,
+                                waiting_time_seconds=wait_seconds,
+                                intersection_id=intersection_id
+                            )
+                        except Exception as e:
+                            print(f"[CAR {self.agent.jid}] Error recording waiting time: {e}")
                     
-                    # Record to metrics manager for ML training
-                    try:
-                        # Get intersection from traffic light ID
-                        tl_id = str(self.car.stopped_at_tl_id)
-                        intersection_id = "_".join(tl_id.split("_")[:2]) if "_" in tl_id else "unknown"
-                        
-                        metrics = get_metrics_manager()
-                        metrics.record_waiting_time(
-                            sim_time=self.env.simulation_time,
-                            car_id=str(self.car.sprites()[0].id),
-                            traffic_light_id=tl_id,
-                            waiting_time_seconds=wait_seconds,
-                            intersection_id=intersection_id
-                        )
-                    except Exception as e:
-                        print(f"[CAR {self.agent.jid}] Error recording waiting time: {e}")
-                        
-                self.car.stopped_at_tl_start_time = False
+                # Clear stopped at traffic light start time flag if it exists
+                if hasattr(self.car, 'stopped_at_tl_start_time'):
+                    self.car.stopped_at_tl_start_time = False
 
             def calc_time_difference(self, start_time, end_time):
                 time_format = "%Y-%m-%d %H:%M:%S"
@@ -333,7 +396,7 @@ class CarAgent(Agent):
                 coordinates = self.env.car_positions[self.id]
 
                 # Detection distance ahead based on direction
-                detection_distance = 50  # pixels ahead to check
+                detection_distance = 40  # pixels ahead to check (balanced for safety and lane changes)
                 same_lane_tolerance = 15  # STRICT - only cars in same lane
 
                 # Normalize angle
@@ -419,29 +482,33 @@ class CarAgent(Agent):
             async def run(self):
                 msg = await self.receive(timeout=1)
 
-                if msg and msg.get_metadata("protocol") == "fipa-subscribe":
+                if msg:
+                    # Template already filters by protocol, so we can process any message that arrives
                     performative = msg.get_metadata("performative")
                     conv_id = msg.get_metadata("conversation-id")
 
                     if performative == "agree":
                         # Subscrição aceite
                         subscription_id = msg.get_metadata("subscription-id")
-                        self.agent.subscribed_traffic_lights[str(msg.sender)] = subscription_id
-                        print(f"[CAR {self.agent.jid}] Subscrição confirmada por {msg.sender}")
-                        print(f"[CAR {self.agent.jid}] Status inicial: {msg.body}")
+                        if subscription_id:
+                            self.agent.subscribed_traffic_lights[str(msg.sender)] = subscription_id
+                        # print(f"[CAR {self.agent.jid}] Subscrição confirmada por {msg.sender}")
+                        # print(f"[CAR {self.agent.jid}] Status inicial: {msg.body}")
 
                     elif performative == "inform":
                         # Notificação de mudança de estado
-                        print(f"[CAR {self.agent.jid}] Atualização recebida: {msg.body}")
+                        # print(f"[CAR {self.agent.jid}] Atualização recebida: {msg.body}")
 
                         # Aqui pode processar a mudança de estado
-                        if "GREEN" in msg.body:
-                            print(f"[CAR {self.agent.jid}] Semáforo ficou VERDE! Preparar para avançar")
-                        elif "RED" in msg.body:
-                            print(f"[CAR {self.agent.jid}] Semáforo ficou VERMELHO!")
-                        elif "YELLOW" in msg.body:
-                            print(f"[CAR {self.agent.jid}] Semáforo ficou AMARELO! Atenção")
+                        # if "GREEN" in msg.body:
+                        #     print(f"[CAR {self.agent.jid}] Semáforo ficou VERDE! Preparar para avançar")
+                        # elif "RED" in msg.body:
+                        #     print(f"[CAR {self.agent.jid}] Semáforo ficou VERMELHO!")
+                        # elif "YELLOW" in msg.body:
+                        #     print(f"[CAR {self.agent.jid}] Semáforo ficou AMARELO! Atenção")
+                        pass
 
+        # Template matches any message with fipa-subscribe protocol (both AGREE and INFORM)
         template = Template()
         template.set_metadata("protocol", "fipa-subscribe")
         self.add_behaviour(ReceiveNotificationBehaviour(), template)
@@ -457,15 +524,16 @@ class CarAgent(Agent):
 
                     if conv_id in self.agent.pending_green_requests:
                         if performative == "agree":
-                            print(f"[CAR {self.agent.jid}] AGREE recebido para pedido de luz verde")
+                            # print(f"[CAR {self.agent.jid}] AGREE recebido para pedido de luz verde")
+                            pass
                         elif performative == "inform":
-                            print(f"[CAR {self.agent.jid}] INFORM recebido: {msg.body}")
+                            # print(f"[CAR {self.agent.jid}] INFORM recebido: {msg.body}")
                             del self.agent.pending_green_requests[conv_id]
                         elif performative == "refuse":
-                            print(f"[CAR {self.agent.jid}] REFUSE recebido: {msg.body}")
+                            # print(f"[CAR {self.agent.jid}] REFUSE recebido: {msg.body}")
                             del self.agent.pending_green_requests[conv_id]
                         elif performative == "failure":
-                            print(f"[CAR {self.agent.jid}] FAILURE recebido: {msg.body}")
+                            # print(f"[CAR {self.agent.jid}] FAILURE recebido: {msg.body}")
                             del self.agent.pending_green_requests[conv_id]
 
         template_request = Template()
@@ -481,8 +549,9 @@ class CarAgent(Agent):
                     performative = msg.get_metadata("performative")
                     
                     if performative == "inform":
-                        print(f"[CAR {self.agent.jid}] Broadcast recebido: {msg.body}")
+                        # print(f"[CAR {self.agent.jid}] Broadcast recebido: {msg.body}")
                         # React to system alerts if needed (e.g., congestion warnings)
+                        pass
 
         template_inform = Template()
         template_inform.set_metadata("protocol", "fipa-inform")

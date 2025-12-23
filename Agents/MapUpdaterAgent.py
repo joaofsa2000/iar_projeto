@@ -14,10 +14,11 @@ from Agents.CarAgent import CarAgent
 
 
 class MapUpdaterAgent(Agent):
-    def __init__(self, jid, password, environment, initial_car_count=15):
+    def __init__(self, jid, password, environment, initial_car_count=15, debug_mode=False):
         super().__init__(jid, password)
         self.environment = environment
         self.id = jid
+        self.debug_mode = debug_mode  # Debug mode: only spawn 2 cars on same lane
         
         # Counter for spawning new cars with unique IDs
         self.next_car_id = initial_car_count  # Start after initial cars
@@ -51,54 +52,150 @@ class MapUpdaterAgent(Agent):
         period = MapUpdateBehaviour(period=0, start_at=start_at)
         self.add_behaviour(period)
 
-        # Comportamento periódico (2s) para criar carros normais baseado na densidade de tráfego
-        class CarSpawnBehaviour(PeriodicBehaviour):
-            async def run(self):
-                # Check if we should spawn a new car based on traffic density
-                if self.agent.environment.should_spawn_car():
-                    car_id = self.agent.next_car_id
-                    self.agent.next_car_id += 1
-                    
-                    try:
-                        new_car = CarAgent(f"carro_{car_id}@localhost", "pass", self.agent.environment)
-                        await new_car.start(auto_register=True)
-                        print(f"[MAP UPDATER] Novo carro spawned: carro_{car_id}")
-                    except Exception as e:
-                        print(f"[MAP UPDATER] Erro ao criar carro: {e}")
-
-            async def on_end(self):
-                pass  # Don't stop the agent when this ends
-
-        car_spawn_interval = 1  # Check every 1 second (faster spawning)
-        start_at = datetime.now() + timedelta(seconds=3)  # Start after initial setup
-        car_spawn_period = CarSpawnBehaviour(period=car_spawn_interval, start_at=start_at)
-        self.add_behaviour(car_spawn_period)
-
-        # Comportamento periódico (15s) para criar um veículo de emergência
-        class EmergencySpawnBehaviour(PeriodicBehaviour):
-            async def run(self):
-                emergency_id = self.agent.next_emergency_id
-                self.agent.next_emergency_id += 1
+        # Comportamento periódico para criar carros normais baseado na densidade de tráfego
+        # Uses simulation time, not real time, so it scales with time speed
+        # DISABLED in debug mode
+        if not self.debug_mode:
+            class CarSpawnBehaviour(CyclicBehaviour):
+                def __init__(self, agent):
+                    super().__init__()
+                    self.agent = agent
+                    self.last_spawn_time = None  # Store last spawn time in simulation time
+                    self.spawn_interval_sim = 0.5  # Spawn check interval in simulation seconds
                 
-                print(f"[MAP UPDATER {self.agent.jid}] Criando veículo de emergência #{emergency_id}")
-                try:
-                    emergency_car = EmergencyCarAgent(f"emergencia_carro_{emergency_id}@localhost", "pass", self.agent.environment)
-                    await emergency_car.start(auto_register=True)
-                except Exception as e:
-                    print(f"[MAP UPDATER] Erro ao criar veículo emergência: {e}")
+                async def run(self):
+                    # Use simulation time, not real time
+                    current_sim_time = self.agent.environment.simulation_time
+                    
+                    # Initialize last_spawn_time on first run
+                    if self.last_spawn_time is None:
+                        self.last_spawn_time = current_sim_time
+                        # Very short initial sleep, adjusted by simulation speed
+                        base_sleep = 0.01
+                        sim_speed = max(1, self.agent.environment.time_speed)
+                        await asyncio.sleep(base_sleep / sim_speed)
+                        return
+                    
+                    # Calculate elapsed simulation time
+                    time_diff = (current_sim_time - self.last_spawn_time).total_seconds()
+                    
+                    # Check current car count and target
+                    current_cars = len(self.agent.environment.cars)
+                    min_cars = 10
+                    max_cars = 50
+                    target_cars = int(min_cars + (self.agent.environment.current_traffic_density * (max_cars - min_cars)))
+                    
+                    # Process spawn checks based on elapsed simulation time
+                    # This ensures spawn rate scales proportionally with simulation speed
+                    if time_diff >= self.spawn_interval_sim:
+                        # Calculate how many spawn intervals have passed
+                        spawn_intervals_passed = time_diff / self.spawn_interval_sim
+                        
+                        # If below target, spawn more aggressively
+                        if current_cars < target_cars:
+                            # Spawn one car per interval that passed (or more if very below target)
+                            spawns_needed = max(1, int(spawn_intervals_passed))
+                            # If significantly below target, spawn even more
+                            if current_cars < target_cars * 0.7:
+                                spawns_needed = int(spawn_intervals_passed * 1.5)
+                            spawns_needed = min(spawns_needed, 20)  # Cap at 20 per check
+                        else:
+                            # At or above target - use probability, but still process all intervals
+                            spawns_needed = max(1, int(spawn_intervals_passed))
+                            spawns_needed = min(spawns_needed, 10)  # Cap at 10 per check
+                        
+                        # Process spawns
+                        spawned_count = 0
+                        for _ in range(spawns_needed):
+                            # Check if we should spawn a new car based on traffic density
+                            if self.agent.environment.should_spawn_car():
+                                car_id = self.agent.next_car_id
+                                self.agent.next_car_id += 1
 
-            async def on_end(self):
-                pass  # Don't stop the agent when this ends
+                                try:
+                                    new_car = CarAgent(f"carro_{car_id}@localhost", "pass", self.agent.environment)
+                                    await new_car.start(auto_register=True)
+                                    spawned_count += 1
+                                    # print(f"[MAP UPDATER] Novo carro spawned: carro_{car_id}")
+                                except Exception as e:
+                                    print(f"[MAP UPDATER] Erro ao criar carro: {e}")  # Keep errors
+                        
+                        # Update last spawn time to current time
+                        # This ensures we process all elapsed time, not just one interval
+                        self.last_spawn_time = current_sim_time
+                    
+                    # Sleep time: must be inversely proportional to simulation speed
+                    # If sim is 10x faster, we need to check 10x more frequently in real time
+                    # to catch all the simulation time that passes
+                    base_sleep = 0.05  # Base check frequency (20 checks per second real time)
+                    sim_speed = max(1, self.agent.environment.time_speed)
+                    adjusted_sleep = base_sleep / sim_speed
+                    
+                    # Additional reduction when significantly below target
+                    if current_cars < target_cars * 0.8:
+                        adjusted_sleep *= 0.5
+                    
+                    # Minimum sleep to avoid overwhelming the system
+                    adjusted_sleep = max(0.002, adjusted_sleep)  # Very short minimum
+                    await asyncio.sleep(adjusted_sleep)
 
-        emergency_interval = 15  # Every 15 seconds
-        start_at = datetime.now() + timedelta(seconds=emergency_interval)
-        period = EmergencySpawnBehaviour(period=emergency_interval, start_at=start_at)
-        self.add_behaviour(period)
+            self.add_behaviour(CarSpawnBehaviour(self))
+        #else:
+            # print("[MAP UPDATER] DEBUG MODE: Periodic car spawning disabled")
+
+        # Comportamento periódico para criar um veículo de emergência
+        # Uses simulation time, not real time, so it scales with time speed
+        class EmergencySpawnBehaviour(CyclicBehaviour):
+            def __init__(self, agent):
+                super().__init__()
+                self.agent = agent
+                self.last_spawn_time = None  # Store last spawn time in simulation time
+                self.spawn_interval_sim = 15.0  # Spawn interval in simulation seconds
+            
+            async def run(self):
+                # Use simulation time, not real time
+                current_sim_time = self.agent.environment.simulation_time
+                
+                # Initialize last_spawn_time on first run
+                if self.last_spawn_time is None:
+                    self.last_spawn_time = current_sim_time
+                    # Adjust sleep based on simulation speed
+                    base_sleep = 0.1
+                    sim_speed = max(1, self.agent.environment.time_speed)
+                    await asyncio.sleep(base_sleep / sim_speed)
+                    return
+                
+                # Calculate elapsed simulation time
+                time_diff = (current_sim_time - self.last_spawn_time).total_seconds()
+                
+                # Check if enough simulation time has passed
+                if time_diff >= self.spawn_interval_sim:
+                    emergency_id = self.agent.next_emergency_id
+                    self.agent.next_emergency_id += 1
+                    
+                    # print(f"[MAP UPDATER {self.agent.jid}] Criando veículo de emergência #{emergency_id}")
+                    try:
+                        emergency_car = EmergencyCarAgent(f"emergencia_carro_{emergency_id}@localhost", "pass", self.agent.environment)
+                        await emergency_car.start(auto_register=True)
+                    except Exception as e:
+                        print(f"[MAP UPDATER] Erro ao criar veículo emergência: {e}")
+                    
+                    # Update last spawn time
+                    self.last_spawn_time = current_sim_time
+                
+                # Small sleep to avoid busy waiting - adjust based on simulation speed
+                base_sleep = 0.1
+                sim_speed = max(1, self.agent.environment.time_speed)
+                adjusted_sleep = base_sleep / sim_speed
+                adjusted_sleep = max(0.005, adjusted_sleep)  # Minimum sleep
+                await asyncio.sleep(adjusted_sleep)
+
+        self.add_behaviour(EmergencySpawnBehaviour(self))
 
         # Comportamento periódico (15s) para análise de congestionamento e ajuste de semáforos
         class CongestionAnalysisBehaviour(PeriodicBehaviour):
             async def run(self):
-                print(f"[MAP UPDATER {self.agent.jid}] Analisando padrões de tráfego e ajustando semáforos...")
+                # print(f"[MAP UPDATER {self.agent.jid}] Analisando padrões de tráfego e ajustando semáforos...")
 
                 # Mapeia cruzamento para agente de semáforo
                 crossing_to_agent = {
@@ -232,9 +329,9 @@ class MapUpdaterAgent(Agent):
                 msg.body = json.dumps(adjustment_info)
 
                 await self.send(msg)
-                print(f"[MAP UPDATER {self.agent.jid}] Informação enviada para {tl_jid}: "
-                      f"Reduzir tempo vermelho {timing_adjustment['direction']} em "
-                      f"{timing_adjustment['red_reduction_seconds']}s (todas as 3 faixas)")
+                # print(f"[MAP UPDATER {self.agent.jid}] Informação enviada para {tl_jid}: "
+                #       f"Reduzir tempo vermelho {timing_adjustment['direction']} em "
+                #       f"{timing_adjustment['red_reduction_seconds']}s (todas as 3 faixas)")
 
             async def broadcast_alert(self, alert_message: str):
                 """Broadcast an alert message to all traffic light agents."""
@@ -266,21 +363,21 @@ class MapUpdaterAgent(Agent):
                     performative = msg.get_metadata("performative")
                     conv_id = msg.get_metadata("conversation-id")
 
-                    if performative == "agree":
-                        print(f"[MAP UPDATER {self.agent.jid}] AGREE recebido de {msg.sender}")
-                        print(f"[MAP UPDATER {self.agent.jid}] Semáforo aceitou ajustar tempos")
-
-                    elif performative == "inform":
-                        print(f"[MAP UPDATER {self.agent.jid}] INFORM recebido de {msg.sender}")
-                        print(f"[MAP UPDATER {self.agent.jid}] Resultado: {msg.body}")
-
-                    elif performative == "refuse":
-                        print(f"[MAP UPDATER {self.agent.jid}] REFUSE recebido de {msg.sender}")
-                        print(f"[MAP UPDATER {self.agent.jid}] Motivo: {msg.body}")
-
-                    elif performative == "failure":
-                        print(f"[MAP UPDATER {self.agent.jid}] FAILURE recebido de {msg.sender}")
-                        print(f"[MAP UPDATER {self.agent.jid}] Erro: {msg.body}")
+                    # if performative == "agree":
+                    #     print(f"[MAP UPDATER {self.agent.jid}] AGREE recebido de {msg.sender}")
+                    #     print(f"[MAP UPDATER {self.agent.jid}] Semáforo aceitou ajustar tempos")
+                    #
+                    # elif performative == "inform":
+                    #     print(f"[MAP UPDATER {self.agent.jid}] INFORM recebido de {msg.sender}")
+                    #     print(f"[MAP UPDATER {self.agent.jid}] Resultado: {msg.body}")
+                    #
+                    # elif performative == "refuse":
+                    #     print(f"[MAP UPDATER {self.agent.jid}] REFUSE recebido de {msg.sender}")
+                    #     print(f"[MAP UPDATER {self.agent.jid}] Motivo: {msg.body}")
+                    #
+                    # elif performative == "failure":
+                    #     print(f"[MAP UPDATER {self.agent.jid}] FAILURE recebido de {msg.sender}")
+                    #     print(f"[MAP UPDATER {self.agent.jid}] Erro: {msg.body}")
 
         template = Template()
         template.set_metadata("protocol", "fipa-request")
@@ -308,7 +405,7 @@ class MapUpdaterAgent(Agent):
 
                 alert_msg = f"SYSTEM_STATUS: {status} | Vehicles: {total_cars} | Stopped: {total_stopped} | Avg Speed: {avg_speed:.1f}"
 
-                print(f"[MAP UPDATER {self.agent.jid}] Broadcasting: {alert_msg}")
+                # print(f"[MAP UPDATER {self.agent.jid}] Broadcasting: {alert_msg}")
 
                 # Broadcast to all traffic light agents
                 await self.broadcast_to_traffic_lights(alert_msg)

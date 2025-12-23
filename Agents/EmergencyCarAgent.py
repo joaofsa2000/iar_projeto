@@ -46,16 +46,21 @@ class EmergencyCarAgent(Agent):
                         del self.env.car_positions[self.id]
                     if self.car in self.env.emergency_cars:
                         self.env.emergency_cars.remove(self.car)
-                    print(f"[VEÍCULO EMERGÊNCIA {self.agent.jid}] Percurso concluído - agente parado")
+                    # print(f"[VEÍCULO EMERGÊNCIA {self.agent.jid}] Percurso concluído - agente parado")
                     await self.agent.stop()
                     return
 
+                # 1. Decidir movimento (AGENTE decide)
                 await self.move()
                 
-                # Update position in environment (like CarAgent does)
-                self.env.update_car_position(self.id, car_sprite.get_car_position())
+                # 2. Executar física (SPRITE executa)
+                if car_sprite.is_turning[0]:
+                    car_sprite.handle_turning()
+                elif not car_sprite.is_car_stopped:
+                    car_sprite.go_forward()
                 
-                car_sprite.update()
+                # 3. Atualizar posição no ambiente
+                self.env.update_car_position(self.id, car_sprite.get_car_position())
 
             async def move(self):
                 """Movement logic - same as CarAgent but without stopping at red lights."""
@@ -106,7 +111,7 @@ class EmergencyCarAgent(Agent):
                 msg.body = f"EMERGENCY_REQUEST: Veículo {self.agent.guid} solicita luz verde em {tl_id}"
 
                 await self.send(msg)
-                print(f"[VEÍCULO EMERGÊNCIA {self.agent.jid}] REQUEST enviado para {tl_jid}")
+                # print(f"[VEÍCULO EMERGÊNCIA {self.agent.jid}] REQUEST enviado para {tl_jid}")
 
         self.add_behaviour(MovementBehaviour(self))
 
@@ -115,10 +120,10 @@ class EmergencyCarAgent(Agent):
                 msg = await self.receive(timeout=1)
                 if msg:
                     performative = msg.get_metadata("performative")
-                    if performative == "agree":
-                        print(f"[VEÍCULO EMERGÊNCIA {self.agent.jid}] AGREE recebido")
-                    elif performative == "inform":
-                        print(f"[VEÍCULO EMERGÊNCIA {self.agent.jid}] INFORM: {msg.body}")
+                    # if performative == "agree":
+                    #     print(f"[VEÍCULO EMERGÊNCIA {self.agent.jid}] AGREE recebido")
+                    # elif performative == "inform":
+                    #     print(f"[VEÍCULO EMERGÊNCIA {self.agent.jid}] INFORM: {msg.body}")
 
         template = Template()
         template.set_metadata("protocol", "fipa-request")

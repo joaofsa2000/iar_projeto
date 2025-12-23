@@ -114,7 +114,7 @@ class DisruptionManagementAgent(Agent):
                 else:
                     raise e
             
-            print(f"[DISRUPTION MANAGEMENT {self.jid}] Loaded {self.model_type} model from {self.model_path}")
+            # print(f"[DISRUPTION MANAGEMENT {self.jid}] Loaded {self.model_type} model from {self.model_path}")
         except FileNotFoundError as e:
             print(f"[DISRUPTION MANAGEMENT {self.jid}] ERROR: {e}")
             print(f"[DISRUPTION MANAGEMENT] Model file path: {self.model_path}")
