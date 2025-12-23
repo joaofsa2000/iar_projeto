@@ -233,6 +233,7 @@ class Environment:
         # ============================================================
         self.show_help = False  # F1 alterna sobreposição de ajuda
         self.show_lane_debug = False  # F10 mostra linhas de debug das faixas
+        self.show_prediction_debug = False  # P mostra debug de previsões ML
         self.active_disruptions = {}  # {intersection_id: DisruptionType}
         self.disruption_start_times = {}  # {intersection_id: datetime}
         self.disruption_end_times = {}  # {intersection_id: datetime} - when disruption will end (for countdown)
@@ -263,6 +264,9 @@ class Environment:
         
         # Reference to chaos agent (set by main.py)
         self.chaos_agent_jid = None
+        
+        # Predicted disruptions (from DisruptionManagementAgent)
+        self.predicted_disruptions = {}  # {intersection_id: {'prediction': value, 'confidence': value, 'timestamp': datetime}}
         
         # ============================================================
         # MÉTRICAS DE DESEMPENHO
@@ -694,6 +698,11 @@ class Environment:
                 self.show_lane_debug = not self.show_lane_debug
                 print(f"[DEBUG] Debug de faixas {'ativo' if self.show_lane_debug else 'desativo'}")
             
+            # P - Toggle prediction debug display
+            elif event.key == pygame.K_p:
+                self.show_prediction_debug = not self.show_prediction_debug
+                print(f"[DEBUG] Debug de previsões ML {'ativo' if self.show_prediction_debug else 'desativo'}")
+            
             # F12 - Toggle FPS display
             elif event.key == pygame.K_F12:
                 self.show_fps = not self.show_fps
@@ -848,6 +857,10 @@ class Environment:
         # Notify chaos agent if this was a manual trigger
         if not managed_by_chaos and self.chaos_agent_jid:
             self._notify_chaos_agent(intersection_id, "manual_trigger")
+        
+        # Clear predicted disruption if it becomes active
+        if intersection_id in self.predicted_disruptions:
+            self.clear_predicted_disruption(intersection_id)
         
         return True
 
@@ -1137,6 +1150,8 @@ class Environment:
                 ("0", "Limpar perturbação selecionada"),
                 ("C", "Limpar TODAS as perturbações"),
                 ("R", "Perturbação aleatória"),
+                ("", ""),
+                ("P", "Debug previsões ML"),
             ]
         else:  # Visualização
             help_lines = [
@@ -1359,6 +1374,213 @@ class Environment:
             self.screen.blit(label_text, (legend_x + self.s(8), self.sy(693)))
             legend_x += self.s(75)
 
+    def set_predicted_disruption(self, intersection_id, prediction_data):
+        """
+        Set a predicted disruption at an intersection.
+        
+        Args:
+            intersection_id: ID of the intersection
+            prediction_data: Dictionary with 'prediction', 'confidence', 'timestamp', 'model_type'
+        """
+        self.predicted_disruptions[intersection_id] = prediction_data
+    
+    def clear_predicted_disruption(self, intersection_id):
+        """Clear a predicted disruption at an intersection."""
+        self.predicted_disruptions.pop(intersection_id, None)
+    
+    def clear_all_predicted_disruptions(self):
+        """Clear all predicted disruptions."""
+        self.predicted_disruptions.clear()
+    
+    def draw_prediction_indicators(self):
+        """
+        Draw visual indicators for predicted disruptions.
+        Uses yellow/orange pulsing circles to distinguish from active disruptions.
+        Draws to game_surface (scaled elements) but text to screen (sharp).
+        """
+        import math
+        
+        # Get current time for pulsing animation
+        current_time = datetime.now()
+        pulse_phase = (current_time.microsecond / 1000000.0) * 2 * math.pi
+        
+        # Draw prediction indicators at each intersection
+        for intersection_id, prediction_data in self.predicted_disruptions.items():
+            # Skip if intersection already has an active disruption
+            if intersection_id in self.active_disruptions:
+                continue
+            
+            # Only show pulsing circle for positive predictions (prediction == 1)
+            prediction = prediction_data.get('prediction', 0)
+            if prediction != 1:
+                continue  # Skip negative predictions
+            
+            center = self.intersection_centers[intersection_id]
+            confidence = prediction_data.get('confidence', 0.5)
+            
+            # Pulsing effect: radius varies between 18 and 22
+            pulse_radius = 20 + int(2 * math.sin(pulse_phase))
+            
+            # Color: Yellow/Orange based on confidence
+            # Higher confidence = more orange, lower = more yellow
+            base_color = (255, 200, 0)  # Yellow
+            if confidence > 0.7:
+                color = (255, 165, 0)  # Orange for high confidence
+            else:
+                color = base_color
+            
+            # Draw pulsing circle with transparency effect (on game surface)
+            # Create a surface with alpha for transparency
+            circle_surface = pygame.Surface((pulse_radius * 2 + 4, pulse_radius * 2 + 4), pygame.SRCALPHA)
+            alpha = 180 + int(75 * math.sin(pulse_phase))  # Pulsing alpha between 180-255
+            pygame.draw.circle(circle_surface, (*color, alpha), (pulse_radius + 2, pulse_radius + 2), pulse_radius)
+            pygame.draw.circle(circle_surface, (255, 255, 255, 255), (pulse_radius + 2, pulse_radius + 2), pulse_radius, 2)
+            
+            # Blit to game surface
+            self.game_surface.blit(circle_surface, (center[0] - pulse_radius - 2, center[1] - pulse_radius - 2))
+        
+        # Draw prediction labels and confidence (on screen for sharp text)
+        for intersection_id, prediction_data in self.predicted_disruptions.items():
+            # Skip if intersection already has an active disruption
+            if intersection_id in self.active_disruptions:
+                continue
+            
+            # Only show label for positive predictions (prediction == 1)
+            prediction = prediction_data.get('prediction', 0)
+            if prediction != 1:
+                continue  # Skip negative predictions
+            
+            center = self.intersection_centers[intersection_id]
+            confidence = prediction_data.get('confidence', 0.5)
+            confidence_pct = int(confidence * 100)
+            
+            # Position label and confidence inside the circle (center of circle)
+            screen_center_x = self.sx(center[0])
+            screen_center_y = self.sy(center[1])
+            
+            # Draw "PRED" label (above center, inside circle)
+            label_text = self.font_small.render("PRED", True, (255, 255, 255))
+            label_rect = label_text.get_rect(center=(screen_center_x, screen_center_y - self.s(6)))
+            self.screen.blit(label_text, label_rect)
+            
+            # Draw confidence percentage (below label, inside circle)
+            confidence_text = self.font_small.render(f"{confidence_pct}%", True, (255, 255, 200))
+            confidence_rect = confidence_text.get_rect(center=(screen_center_x, screen_center_y + self.s(6)))
+            self.screen.blit(confidence_text, confidence_rect)
+    
+    def draw_prediction_debug(self):
+        """
+        Draw prediction debug information on top of each intersection.
+        Shows prediction results, confidence, and key features when debug mode is active.
+        Draws directly to screen for sharp text.
+        """
+        if not self.predicted_disruptions:
+            # Show "No predictions" for all intersections when debug is on
+            for intersection_id in INTERSECTION_IDS:
+                center = self.intersection_centers[intersection_id]
+                screen_x = self.sx(center[0])
+                screen_y = self.sy(center[1])
+                
+                # Draw background box
+                bg_width = self.s(200)
+                bg_height = self.s(60)
+                bg_x = screen_x - bg_width // 2
+                bg_y = screen_y - self.s(80)  # Position above intersection
+                
+                bg_surface = pygame.Surface((bg_width, bg_height), pygame.SRCALPHA)
+                bg_surface.fill((0, 0, 0, 200))
+                self.screen.blit(bg_surface, (bg_x, bg_y))
+                
+                # Draw border
+                pygame.draw.rect(self.screen, (100, 100, 200), (bg_x, bg_y, bg_width, bg_height), 2)
+                
+                # Draw "No prediction" text
+                intersection_name = self.get_intersection_name(intersection_id)
+                title_text = self.font_small.render(f"{intersection_name}", True, (200, 200, 200))
+                title_rect = title_text.get_rect(center=(screen_x, bg_y + self.s(12)))
+                self.screen.blit(title_text, title_rect)
+                
+                no_pred_text = self.font_small.render("Sem previsão", True, (150, 150, 150))
+                no_pred_rect = no_pred_text.get_rect(center=(screen_x, bg_y + self.s(32)))
+                self.screen.blit(no_pred_text, no_pred_rect)
+            
+            return
+        
+        # Draw prediction info for each intersection
+        for intersection_id in INTERSECTION_IDS:
+            center = self.intersection_centers[intersection_id]
+            screen_x = self.sx(center[0])
+            screen_y = self.sy(center[1])
+            
+            # Get prediction data if exists
+            prediction_data = self.predicted_disruptions.get(intersection_id)
+            
+            # Draw background box
+            bg_width = self.s(220)
+            bg_height = self.s(100) if prediction_data else self.s(60)
+            bg_x = screen_x - bg_width // 2
+            bg_y = screen_y - self.s(100)  # Position above intersection
+            
+            bg_surface = pygame.Surface((bg_width, bg_height), pygame.SRCALPHA)
+            bg_surface.fill((0, 0, 0, 220))
+            self.screen.blit(bg_surface, (bg_x, bg_y))
+            
+            # Draw border (yellow/orange for predictions)
+            border_color = (255, 200, 0) if prediction_data else (100, 100, 200)
+            pygame.draw.rect(self.screen, border_color, (bg_x, bg_y, bg_width, bg_height), 2)
+            
+            # Intersection name
+            intersection_name = self.get_intersection_name(intersection_id)
+            title_text = self.font_small.render(f"{intersection_name}", True, (255, 255, 255))
+            title_rect = title_text.get_rect(center=(screen_x, bg_y + self.s(12)))
+            self.screen.blit(title_text, title_rect)
+            
+            if prediction_data:
+                # Prediction result
+                pred_value = "SIM" if prediction_data.get('prediction', 0) == 1 else "NÃO"
+                confidence = prediction_data.get('confidence', 0.0)
+                confidence_pct = int(confidence * 100)
+                model_type = prediction_data.get('model_type', 'unknown')
+                
+                # Prediction text (green if SIM, red if NÃO)
+                pred_color = (100, 255, 100) if pred_value == "SIM" else (255, 100, 100)
+                pred_text = self.font_medium.render(f"Previsão: {pred_value}", True, pred_color)
+                pred_rect = pred_text.get_rect(center=(screen_x, bg_y + self.s(30)))
+                self.screen.blit(pred_text, pred_rect)
+                
+                # Confidence
+                conf_text = self.font_small.render(f"Confiança: {confidence_pct}%", True, (255, 255, 200))
+                conf_rect = conf_text.get_rect(center=(screen_x, bg_y + self.s(48)))
+                self.screen.blit(conf_text, conf_rect)
+                
+                # Model type
+                model_text = self.font_small.render(f"Modelo: {model_type}", True, (200, 200, 255))
+                model_rect = model_text.get_rect(center=(screen_x, bg_y + self.s(66)))
+                self.screen.blit(model_text, model_rect)
+                
+                # Features summary (if available in environment)
+                # Get current features for this intersection
+                try:
+                    total_cars = len(self.car_positions)
+                    # Count all stopped cars, including those stopped behind others
+                    total_stopped = self.count_all_stopped_cars()
+                    avg_speed = self.get_average_speed()
+                    active_disruptions = len(self.active_disruptions)
+                    
+                    features_text = self.font_small.render(
+                        f"Carros: {total_cars} | Parados: {total_stopped} | Vel: {avg_speed:.1f}",
+                        True, (180, 180, 180)
+                    )
+                    features_rect = features_text.get_rect(center=(screen_x, bg_y + self.s(84)))
+                    self.screen.blit(features_text, features_rect)
+                except:
+                    pass
+            else:
+                # No prediction data available - show "Sem previsão" when debug is active
+                no_pred_text = self.font_small.render("Sem previsão", True, (150, 150, 150))
+                no_pred_rect = no_pred_text.get_rect(center=(screen_x, bg_y + self.s(32)))
+                self.screen.blit(no_pred_text, no_pred_rect)
+
     def draw_day_night_overlay(self):
         """Draw day/night lighting effect."""
         if self.day_night_overlay_alpha > 0:
@@ -1369,42 +1591,64 @@ class Environment:
     
     def draw_waiting_timers(self):
         """Draw waiting time timers on top of cars that are stopped at traffic lights.
+        Includes cars stopped directly at lights and cars stopped behind others.
         Drawn to screen at native resolution for sharp text.
-        Uses simulation time so timers respect time speed."""
+        Uses simulation time so timers respect time speed.
+        Iterates through cars_stopped_at_tl to ensure ALL stopped cars get timers."""
         # Use a small scaled font
         timer_font = pygame.font.Font(None, self.s(16))
         
-        # Draw timer for each waiting car
-        for car_id, start_time in list(self.car_waiting_start_times.items()):
-            # Calculate waiting time using simulation time (respects time speed)
-            elapsed = (self.simulation_time - start_time).total_seconds()
-            
-            # Format time with 1 decimal place
-            time_text = f"{elapsed:.1f}"
-            
-            # Find the car's position (in game coordinates)
-            car_pos = self.car_positions.get(car_id)
-            if not car_pos:
-                continue
-            
-            game_x, game_y, _ = car_pos
-            
-            # Convert to screen coordinates
-            screen_x = self.sx(game_x)
-            screen_y = self.sy(game_y)
-            
-            # Render the timer text (white for visibility)
-            text_surface = timer_font.render(time_text, True, (255, 255, 255))
-            text_rect = text_surface.get_rect(center=(screen_x, screen_y))
-            
-            # Draw small dark background for readability
-            bg_rect = text_rect.inflate(self.s(4), self.s(2))
-            bg_surface = pygame.Surface((bg_rect.width, bg_rect.height), pygame.SRCALPHA)
-            bg_surface.fill((0, 0, 0, 180))  # Semi-transparent black
-            self.screen.blit(bg_surface, bg_rect)
-            
-            # Draw the text
-            self.screen.blit(text_surface, text_rect)
+        # Iterate through ALL cars in cars_stopped_at_tl (source of truth for stopped cars)
+        for tl_id, stopped_cars in self.cars_stopped_at_tl.items():
+            for car_id in stopped_cars:
+                # Skip if car doesn't exist in positions (removed from simulation)
+                if car_id not in self.car_positions:
+                    continue
+                
+                # Get car group by ID
+                car_group = self.get_car_by_id(car_id)
+                if not car_group or not car_group.sprites():
+                    continue
+                
+                car_sprite = car_group.sprites()[0]
+                
+                # Only draw timer if car is actually stopped (base_speed == 0)
+                if car_sprite.base_speed == 0:
+                    # Car is stopped at a traffic light - show timer
+                    # If car has waiting start time, use it; otherwise start tracking now
+                    if car_id in self.car_waiting_start_times:
+                        start_time = self.car_waiting_start_times[car_id]
+                        elapsed = (self.simulation_time - start_time).total_seconds()
+                    else:
+                        # Car is in cars_stopped_at_tl but doesn't have start time yet
+                        # Start tracking now and show 0.0 initially
+                        self.start_car_waiting(car_id)
+                        elapsed = 0.0
+                    
+                    # Format time with 1 decimal place
+                    time_text = f"{elapsed:.1f}"
+                    
+                    # Find the car's position
+                    car_pos = self.car_positions.get(car_id)
+                    if car_pos:
+                        game_x, game_y, _ = car_pos
+                        
+                        # Convert to screen coordinates
+                        screen_x = self.sx(game_x)
+                        screen_y = self.sy(game_y)
+                        
+                        # Render the timer text (white for visibility)
+                        text_surface = timer_font.render(time_text, True, (255, 255, 255))
+                        text_rect = text_surface.get_rect(center=(screen_x, screen_y))
+                        
+                        # Draw small dark background for readability
+                        bg_rect = text_rect.inflate(self.s(4), self.s(2))
+                        bg_surface = pygame.Surface((bg_rect.width, bg_rect.height), pygame.SRCALPHA)
+                        bg_surface.fill((0, 0, 0, 180))  # Semi-transparent black
+                        self.screen.blit(bg_surface, bg_rect)
+                        
+                        # Draw the text
+                        self.screen.blit(text_surface, text_rect)
 
     def collision_sprite(self, sprite):
         if pygame.sprite.spritecollide(sprite, self.intersections, False):
@@ -1559,6 +1803,9 @@ class Environment:
 
         # Draw disruption indicators (circles on game surface)
         self.draw_disruption_indicators()
+        
+        # Draw prediction indicators (circles on game surface)
+        self.draw_prediction_indicators()
 
         # ============================================================
         # SCALE AND DISPLAY
@@ -1601,6 +1848,10 @@ class Environment:
         # Draw help overlay if active
         if self.show_help:
             self.draw_help_overlay()
+        
+        # Draw prediction debug info if active
+        if self.show_prediction_debug:
+            self.draw_prediction_debug()
 
         pygame.display.flip()
         
@@ -1621,10 +1872,14 @@ class Environment:
         return car
 
     def get_car_by_id(self, car_id):
+        """Get car group by car_id. Handles both 'carro_' and 'car_' prefixes."""
         for car_group in self.cars:
             if car_group.sprites() and car_group.sprites()[0].id:
-                car_full_id = 'car_' + car_group.sprites()[0].id + "@localhost"
-                if car_full_id == car_id:
+                sprite_id = car_group.sprites()[0].id
+                # Try both formats: carro_X@localhost and car_X@localhost
+                car_full_id_1 = 'carro_' + sprite_id + "@localhost"
+                car_full_id_2 = 'car_' + sprite_id + "@localhost"
+                if car_full_id_1 == car_id or car_full_id_2 == car_id:
                     return car_group
         return None
 
@@ -1699,8 +1954,8 @@ class Environment:
         
         self.last_metrics_save = now
         
-        # Calculate total stopped vehicles
-        total_stopped = sum(len(cars) for cars in self.cars_stopped_at_tl.values())
+        # Calculate total stopped vehicles (including those stopped behind others)
+        total_stopped = self.count_all_stopped_cars()
         
         # Calculate average waiting time for current session
         total_wait = 0
@@ -1806,6 +2061,68 @@ class Environment:
             return 0.0
         
         return sum(speeds) / len(speeds) * self.speed_modifier
+    
+    def count_all_stopped_cars(self):
+        """
+        Count all stopped cars, including those stopped behind others.
+        Checks both cars_stopped_at_tl and cars that have stopped_at_tl_id set.
+        """
+        stopped_count = 0
+        counted_cars = set()  # Track which cars we've already counted
+        
+        # Count all cars in cars_stopped_at_tl that are still in car_positions and still stopped
+        # This is the source of truth since all stopped cars (directly at lights or behind others)
+        # should be added via set_cars_at_traffic_light()
+        # Also clean up any invalid entries (cars that no longer exist)
+        cars_to_remove = {}  # {tl_id: [car_ids]} - track cars to remove after iteration
+        
+        for tl_id, cars in self.cars_stopped_at_tl.items():
+            for car_id in cars:
+                # Skip if already counted (in case of duplicates)
+                if car_id in counted_cars:
+                    continue
+                
+                # Mark for removal if car doesn't exist in positions (removed from simulation)
+                if car_id not in self.car_positions:
+                    if tl_id not in cars_to_remove:
+                        cars_to_remove[tl_id] = []
+                    cars_to_remove[tl_id].append(car_id)
+                    continue
+                
+                # Get car group to check if it's still stopped
+                car_group = self.get_car_by_id(car_id)
+                if not car_group or not car_group.sprites():
+                    # Car group doesn't exist - mark for removal
+                    if tl_id not in cars_to_remove:
+                        cars_to_remove[tl_id] = []
+                    cars_to_remove[tl_id].append(car_id)
+                    continue
+                
+                car_sprite = car_group.sprites()[0]
+                
+                # Only count if car is actually stopped (base_speed == 0)
+                if car_sprite.base_speed == 0:
+                    stopped_count += 1
+                    counted_cars.add(car_id)
+                else:
+                    # Car is moving but still in cars_stopped_at_tl - mark for removal
+                    if tl_id not in cars_to_remove:
+                        cars_to_remove[tl_id] = []
+                    cars_to_remove[tl_id].append(car_id)
+        
+        # Clean up invalid entries
+        for tl_id, car_ids in cars_to_remove.items():
+            if tl_id in self.cars_stopped_at_tl:
+                for car_id in car_ids:
+                    if car_id in self.cars_stopped_at_tl[tl_id]:
+                        self.cars_stopped_at_tl[tl_id].remove(car_id)
+                # Remove empty lists
+                if not self.cars_stopped_at_tl[tl_id]:
+                    del self.cars_stopped_at_tl[tl_id]
+        
+        # Ensure total_stopped doesn't exceed total_cars
+        total_cars = len(self.car_positions)
+        return min(stopped_count, total_cars)
 
     def get_metrics_summary(self):
         """

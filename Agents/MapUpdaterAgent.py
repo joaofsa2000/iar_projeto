@@ -95,50 +95,11 @@ class MapUpdaterAgent(Agent):
         period = EmergencySpawnBehaviour(period=emergency_interval, start_at=start_at)
         self.add_behaviour(period)
 
-        # Comportamento periódico (25s) para análise de congestionamento
+        # Comportamento periódico (15s) para análise de congestionamento e ajuste de semáforos
         class CongestionAnalysisBehaviour(PeriodicBehaviour):
             async def run(self):
-                print(f"[MAP UPDATER {self.agent.jid}] Analisando congestionamento...")
+                print(f"[MAP UPDATER {self.agent.jid}] Analisando padrões de tráfego e ajustando semáforos...")
 
-                # Inicializa contadores para cada cruzamento
-                CROSSES = {
-                    "top_left": 0,
-                    "top_mid": 0,
-                    "top_right": 0,
-                    "bottom_left": 0,
-                    "bottom_mid": 0,
-                    "bottom_right": 0
-                }
-
-                # Conta o número de carros parados em cada cruzamento
-                cars_stopped = self.agent.environment.cars_stopped_at_tl
-                for x in cars_stopped:
-                    cross = x[:-4]
-                    if cross in CROSSES:
-                        CROSSES[cross] += len(self.agent.environment.cars_stopped_at_tl[x])
-
-                max_cross = max(CROSSES, key=lambda k: CROSSES[k])
-                vehicle_count = max(CROSSES.values())
-
-                print(
-                    f"[MAP UPDATER {self.agent.jid}] Cruzamento mais congestionado: {max_cross} ({vehicle_count} veículos)")
-
-                # Calculate congestion levels for all intersections
-                for intersection_id in CROSSES:
-                    self.agent.environment.calculate_congestion_level(intersection_id)
-
-                # High congestion threshold
-                if vehicle_count > 5:
-                    print(f"[MAP UPDATER {self.agent.jid}] ALERTA DE CONGESTIONAMENTO em {max_cross}!")
-                    
-                    # FIPA REQUEST PROTOCOL - Solicitar aos semáforos para ajustar tempos
-                    await self.request_traffic_adjustment(max_cross, vehicle_count)
-                    
-                    # Broadcast alert to all agents
-                    await self.broadcast_alert(f"CONGESTION_ALERT: High traffic at {max_cross} ({vehicle_count} vehicles)")
-
-            async def request_traffic_adjustment(self, crossing, vehicle_count):
-                """Envia pedido aos semáforos para ajustar ciclos (FIPA Request Protocol)"""
                 # Mapeia cruzamento para agente de semáforo
                 crossing_to_agent = {
                     "top_left": "semaforos_4@localhost",
@@ -149,21 +110,131 @@ class MapUpdaterAgent(Agent):
                     "bottom_right": "semaforos_3@localhost"
                 }
 
-                tl_jid = crossing_to_agent.get(crossing)
-                if not tl_jid:
-                    return
+                # Analisa cada cruzamento e ajusta semáforos
+                for crossing, tl_jid in crossing_to_agent.items():
+                    # Analisa padrões de tráfego para este cruzamento
+                    traffic_analysis = await self.analyze_intersection_traffic(crossing)
+                    
+                    if traffic_analysis:
+                        # Calcula ajuste de tempo baseado na análise
+                        timing_adjustment = self.calculate_timing_adjustment(traffic_analysis)
+                        
+                        if timing_adjustment:
+                            # Envia ajuste para o semáforo
+                            await self.request_traffic_adjustment(
+                                crossing, 
+                                tl_jid, 
+                                timing_adjustment
+                            )
 
+            async def analyze_intersection_traffic(self, intersection_id):
+                """
+                Analisa padrões de tráfego em um cruzamento.
+                Retorna análise com carros parados por direção (vertical/horizontal).
+                """
+                # Conta carros parados por direção
+                vertical_stopped = 0  # top/bottom (norte/sul)
+                horizontal_stopped = 0  # left/right (este/oeste)
+                
+                # Padrões de IDs de semáforos para cada direção
+                # IDs são formatados como: {intersection_id}_{dir[0]}_{pos[0]}
+                # dir[0] pode ser: 't' (top), 'b' (bottom), 'l' (left), 'r' (right)
+                # vertical = top/bottom (t/b), horizontal = left/right (l/r)
+                vertical_patterns = ['_t_', '_b_']  # top e bottom
+                horizontal_patterns = ['_l_', '_r_']  # left e right
+                
+                # Conta carros parados em cada direção
+                cars_stopped = self.agent.environment.cars_stopped_at_tl
+                for tl_id, cars in cars_stopped.items():
+                    # Verifica se este semáforo pertence a este cruzamento
+                    tl_id_str = str(tl_id).lower()
+                    if intersection_id in tl_id_str:
+                        # Conta apenas carros que realmente existem
+                        valid_cars = [c for c in cars if c in self.agent.environment.car_positions]
+                        car_count = len(valid_cars)
+                        
+                        # Determina direção baseado no ID do semáforo
+                        # Procura por padrões como _t_ ou _b_ (vertical) ou _l_ ou _r_ (horizontal)
+                        if any(pattern in tl_id_str for pattern in vertical_patterns):
+                            vertical_stopped += car_count
+                        elif any(pattern in tl_id_str for pattern in horizontal_patterns):
+                            horizontal_stopped += car_count
+                
+                total_stopped = vertical_stopped + horizontal_stopped
+                
+                # Retorna análise se houver carros parados
+                if total_stopped > 0:
+                    return {
+                        'intersection_id': intersection_id,
+                        'vertical_stopped': vertical_stopped,
+                        'horizontal_stopped': horizontal_stopped,
+                        'total_stopped': total_stopped,
+                        'vertical_ratio': vertical_stopped / total_stopped if total_stopped > 0 else 0.5,
+                        'horizontal_ratio': horizontal_stopped / total_stopped if total_stopped > 0 else 0.5
+                    }
+                
+                return None
+
+            def calculate_timing_adjustment(self, traffic_analysis):
+                """
+                Calcula ajuste de tempo baseado na análise de tráfego.
+                Retorna informação sobre qual direção precisa reduzir tempo vermelho.
+                """
+                vertical_stopped = traffic_analysis['vertical_stopped']
+                horizontal_stopped = traffic_analysis['horizontal_stopped']
+                total_stopped = traffic_analysis['total_stopped']
+                
+                # Se não há muitos carros parados, não ajusta
+                if total_stopped < 2:
+                    return None
+                
+                # Determina qual direção tem mais carros parados (precisa reduzir tempo vermelho)
+                # Reduz tempo vermelho da direção com mais carros parados
+                if vertical_stopped > horizontal_stopped and vertical_stopped >= 2:
+                    # Mais carros parados na direção vertical -> reduz tempo vermelho vertical
+                    red_reduction = min(3, int(vertical_stopped * 0.4))  # Reduz 1-3 segundos
+                    return {
+                        'direction': 'vertical',  # vertical = top/bottom (todas as 3 faixas)
+                        'red_reduction_seconds': red_reduction,
+                        'duration_seconds': 45  # Ajuste válido por 45 segundos de simulação
+                    }
+                elif horizontal_stopped > vertical_stopped and horizontal_stopped >= 2:
+                    # Mais carros parados na direção horizontal -> reduz tempo vermelho horizontal
+                    red_reduction = min(3, int(horizontal_stopped * 0.4))  # Reduz 1-3 segundos
+                    return {
+                        'direction': 'horizontal',  # horizontal = left/right (todas as 3 faixas)
+                        'red_reduction_seconds': red_reduction,
+                        'duration_seconds': 45
+                    }
+                
+                return None
+
+            async def request_traffic_adjustment(self, crossing, tl_jid, timing_adjustment):
+                """Informa aos semáforos para reduzir tempo vermelho (FIPA Inform Protocol)"""
                 conv_id = str(uuid.uuid4())
 
+                # Cria mensagem informando redução de tempo vermelho
+                adjustment_info = {
+                    'action': 'reduce_red_time',
+                    'direction': timing_adjustment['direction'],  # 'vertical' ou 'horizontal'
+                    'red_reduction_seconds': timing_adjustment['red_reduction_seconds'],
+                    'duration': timing_adjustment['duration_seconds'],
+                    'intersection': crossing,
+                    'apply_to_all_lanes': True  # Aplica a todas as 3 faixas da direção
+                }
+                
+                import json
                 msg = Message(to=tl_jid)
-                msg.set_metadata("performative", "request")
-                msg.set_metadata("protocol", "fipa-request")
+                msg.set_metadata("performative", "inform")  # Inform, não Request
+                msg.set_metadata("protocol", "fipa-inform")
                 msg.set_metadata("conversation-id", conv_id)
-                msg.set_metadata("action", "adjust_timing")
-                msg.body = f"CONGESTION_ALERT: {vehicle_count} vehicles at {crossing}. Request extended green phase."
+                msg.set_metadata("action", "reduce_red_time")
+                msg.body = json.dumps(adjustment_info)
 
                 await self.send(msg)
-                print(f"[MAP UPDATER {self.agent.jid}] REQUEST enviado para {tl_jid} (conv-id: {conv_id})")
+                print(f"[MAP UPDATER {self.agent.jid}] Informação enviada para {tl_jid}: "
+                      f"Reduzir tempo vermelho {timing_adjustment['direction']} em "
+                      f"{timing_adjustment['red_reduction_seconds']}s (todas as 3 faixas)")
 
             async def broadcast_alert(self, alert_message: str):
                 """Broadcast an alert message to all traffic light agents."""
@@ -181,7 +252,7 @@ class MapUpdaterAgent(Agent):
             async def on_end(self):
                 await self.agent.stop()
 
-        congestion_interval = 25
+        congestion_interval = 5  # Analisa e ajusta a cada 5 segundos
         start_at = datetime.now() + timedelta(seconds=congestion_interval)
         period = CongestionAnalysisBehaviour(period=congestion_interval, start_at=start_at)
         self.add_behaviour(period)

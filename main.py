@@ -8,6 +8,7 @@ from Agents.MapUpdaterAgent import MapUpdaterAgent
 from Agents.TrafficLightAgent import TrafficLightAgent
 from Agents.EmergencyCarAgent import EmergencyCarAgent
 from Agents.ChaosAgent import ChaosAgent
+from Agents.DisruptionManagementAgent import DisruptionManagementAgent
 
 from Environment.environment import Environment
 from Models.LightStatus import LightStatus
@@ -39,6 +40,11 @@ async def main():
     chaos_agent = ChaosAgent("chaos@localhost", "pass", environment)
     await chaos_agent.start(auto_register=True)
     environment.set_chaos_agent_jid("chaos@localhost")
+    
+    # Cria e inicia o Disruption Management Agent (previsão de perturbações com ML)
+    print("[SETUP] Iniciando Disruption Management Agent (previsão ML)...")
+    disruption_agent = DisruptionManagementAgent("disruption_management@localhost", "pass", environment)
+    await disruption_agent.start(auto_register=True)
     
     # Definição dos semáforos
     # NOTA: CrossingTrafficLightModel espera: (id, bottom_tl, top_tl, left_tl, right_tl)
@@ -308,6 +314,12 @@ async def main():
             await chaos_agent.stop()
         except Exception as e:
             print(f"Erro ao parar chaos agent: {e}")
+        
+        print("Parando Disruption Management Agent...")
+        try:
+            await disruption_agent.stop()
+        except Exception as e:
+            print(f"Erro ao parar disruption management agent: {e}")
 
         # Guardar todas as métricas para análise futura e treino de modelos
         print("\nGuardando métricas para análise e ML...")

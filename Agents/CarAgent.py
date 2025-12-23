@@ -59,6 +59,16 @@ class CarAgent(Agent):
                         del self.env.car_positions[self.id]
                     # Clear waiting time
                     self.env.stop_car_waiting(self.id)
+                    
+                    # Remove car from cars_stopped_at_tl if it was stopped
+                    # Check all traffic lights and remove this car
+                    for tl_id in list(self.env.cars_stopped_at_tl.keys()):
+                        if self.id in self.env.cars_stopped_at_tl[tl_id]:
+                            self.env.cars_stopped_at_tl[tl_id].remove(self.id)
+                            # Clean up empty lists
+                            if not self.env.cars_stopped_at_tl[tl_id]:
+                                del self.env.cars_stopped_at_tl[tl_id]
+                    
                     # Remove from cars list
                     if self.car in self.env.cars:
                         self.env.cars.remove(self.car)
@@ -67,11 +77,19 @@ class CarAgent(Agent):
                     return
                 
                 # Verifica colisões com outros carros
-                if not await self.is_colliding():
+                collision_result = await self.is_colliding()
+                if not collision_result:
                     await self.move()
                     self.env.update_car_position(self.id, car_sprite.get_car_position())
                 else:
                     car_sprite.stop_car()
+                    # If car inherited stopped_at_tl_id from collision, ensure it's tracked
+                    if hasattr(self.car, 'stopped_at_tl_id') and self.car.stopped_at_tl_id:
+                        # Ensure car is in cars_stopped_at_tl
+                        await self.set_cars_at_traffic_light(self.car.stopped_at_tl_id)
+                        # Start tracking waiting time if not already tracking
+                        if self.id not in self.env.car_waiting_start_times:
+                            self.env.start_car_waiting(self.id)
 
                 car_sprite.update()
 
@@ -119,10 +137,33 @@ class CarAgent(Agent):
                     self.agent.waiting_start_time = None
                     self.agent.green_request_sent = False
 
-                    # Clear stopped at traffic light flag
-                    self.car.stopped_at_tl_id = False
+                    # Get waiting time BEFORE stopping it (uses simulation time)
+                    # Check if car was stopped at a traffic light and record the waiting time
+                    if hasattr(self.car, 'stopped_at_tl_id') and self.car.stopped_at_tl_id:
+                        await self.set_cars_stopped_times()
 
-                    # Stop tracking waiting time for visual timer
+                    # Clear stopped at traffic light flag
+                    # Get old_tl_id before clearing (check both group and sprite)
+                    old_tl_id = None
+                    if hasattr(self.car, 'stopped_at_tl_id'):
+                        old_tl_id = self.car.stopped_at_tl_id
+                        self.car.stopped_at_tl_id = False
+                    elif self.car.sprites():
+                        car_sprite = self.car.sprites()[0]
+                        if hasattr(car_sprite, 'stopped_at_tl_id'):
+                            old_tl_id = car_sprite.stopped_at_tl_id
+                            car_sprite.stopped_at_tl_id = False
+                    
+                    # Remove car from cars_stopped_at_tl when it starts moving
+                    # Remove from all traffic lights to ensure complete cleanup
+                    for tl_id in list(self.env.cars_stopped_at_tl.keys()):
+                        if self.id in self.env.cars_stopped_at_tl[tl_id]:
+                            self.env.cars_stopped_at_tl[tl_id].remove(self.id)
+                            # Clean up empty lists
+                            if not self.env.cars_stopped_at_tl[tl_id]:
+                                del self.env.cars_stopped_at_tl[tl_id]
+
+                    # Stop tracking waiting time for visual timer (after recording)
                     self.env.stop_car_waiting(self.id)
 
                     if self.env.collision_sprite(self.car.sprites()[0]):
@@ -132,11 +173,6 @@ class CarAgent(Agent):
                     else:
                         self.car.sprites()[0].flag_car_is_turning(False)
                         self.car.sprites()[0].fires_car()
-
-                    if hasattr(self.car, 'stopped_at_tl_start_time') and self.car.stopped_at_tl_start_time:
-                        await self.set_cars_stopped_times()
-
-                    self.car.stopped_at_tl_id = False
 
             async def check_and_request_green(self, tl_id):
                 """Check waiting time and request green light if threshold exceeded."""
@@ -224,18 +260,22 @@ class CarAgent(Agent):
                     print(f"[CAR {self.agent.jid}] CANCEL enviado para {tl_jid}")
 
             async def set_cars_stopped_times(self):
-                difference = self.calc_time_difference(self.car.stopped_at_tl_start_time,
-                                                       datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-                if difference:
+                # Use simulation time from environment instead of real time
+                wait_seconds = self.env.get_car_waiting_time(self.id)
+                
+                # get_car_waiting_time returns None if car is not waiting, or elapsed seconds if waiting
+                if wait_seconds is not None and wait_seconds > 0:
+                    # Format as HH:MM:SS for display
+                    hours = int(wait_seconds // 3600)
+                    minutes = int((wait_seconds % 3600) // 60)
+                    seconds = int(wait_seconds % 60)
+                    difference = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+                    
                     self.env.cars_stopped_times.append(
                         (self.car.stopped_at_tl_id, self.car.sprites()[0].id, difference))
                     
                     # Record to metrics manager for ML training
                     try:
-                        # Parse difference string to seconds
-                        time_parts = difference.split(":")
-                        wait_seconds = int(time_parts[0]) * 3600 + int(time_parts[1]) * 60 + int(time_parts[2])
-                        
                         # Get intersection from traffic light ID
                         tl_id = str(self.car.stopped_at_tl_id)
                         intersection_id = "_".join(tl_id.split("_")[:2]) if "_" in tl_id else "unknown"
@@ -249,7 +289,7 @@ class CarAgent(Agent):
                             intersection_id=intersection_id
                         )
                     except Exception as e:
-                        pass  # Don't break the flow if metrics fail
+                        print(f"[CAR {self.agent.jid}] Error recording waiting time: {e}")
                         
                 self.car.stopped_at_tl_start_time = False
 
@@ -262,6 +302,20 @@ class CarAgent(Agent):
                 return str(difference) if difference > timedelta(0) else False
 
             async def set_cars_at_traffic_light(self, tl_id):
+                """Add car to cars_stopped_at_tl for the given traffic light.
+                Also removes car from any other traffic light it might be registered at."""
+                if not tl_id:
+                    return
+                
+                # Remove car from any other traffic light it might be registered at
+                for other_tl_id in list(self.env.cars_stopped_at_tl.keys()):
+                    if other_tl_id != tl_id and self.id in self.env.cars_stopped_at_tl[other_tl_id]:
+                        self.env.cars_stopped_at_tl[other_tl_id].remove(self.id)
+                        # Clean up empty lists
+                        if not self.env.cars_stopped_at_tl[other_tl_id]:
+                            del self.env.cars_stopped_at_tl[other_tl_id]
+                
+                # Add car to the new traffic light
                 if tl_id not in self.env.cars_stopped_at_tl:
                     self.env.cars_stopped_at_tl[tl_id] = []
 
@@ -334,13 +388,26 @@ class CarAgent(Agent):
                             is_blocking = True
 
                     if is_blocking:
-                        # If other car is stopped at traffic light, record it
+                        # If other car is stopped at traffic light, inherit the stopped state
                         other_car_obj = self.env.get_car_by_id(env_car)
-                        if other_car_obj and hasattr(other_car_obj, 'stopped_at_tl_id'):
-                            tl_id = other_car_obj.stopped_at_tl_id
+                        if other_car_obj:
+                            # Check stopped_at_tl_id on both group and sprite
+                            tl_id = None
+                            if hasattr(other_car_obj, 'stopped_at_tl_id') and other_car_obj.stopped_at_tl_id:
+                                tl_id = other_car_obj.stopped_at_tl_id
+                            elif other_car_obj.sprites():
+                                other_sprite = other_car_obj.sprites()[0]
+                                if hasattr(other_sprite, 'stopped_at_tl_id') and other_sprite.stopped_at_tl_id:
+                                    tl_id = other_sprite.stopped_at_tl_id
+                            
                             if tl_id:
+                                # Inherit stopped_at_tl_id from the blocking car
                                 self.car.stopped_at_tl_id = tl_id
                                 await self.set_cars_at_traffic_light(tl_id)
+                                
+                                # Start tracking waiting time if not already tracking
+                                if self.id not in self.env.car_waiting_start_times:
+                                    self.env.start_car_waiting(self.id)
                         return True
 
                 return False

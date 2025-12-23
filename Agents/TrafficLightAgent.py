@@ -196,23 +196,68 @@ class TrafficLightAgent(Agent):
             async def process_timing_adjustment(self, body):
                 """Process timing adjustment request from MapUpdater."""
                 try:
-                    print(f"[SEMÁFORO {self.agent.jid}] Ajustando tempos: {body}")
+                    import json
                     
-                    # Parse the congestion info and adjust timing
-                    # Increase green duration for congested directions
-                    if "CONGESTION_ALERT" in body:
-                        # Increase green duration temporarily
-                        original_green = self.agent.green_duration
-                        self.agent.green_duration = min(15, self.agent.green_duration + 3)
-                        print(f"[SEMÁFORO {self.agent.jid}] Duração verde: {original_green}s -> {self.agent.green_duration}s")
+                    # Try to parse as JSON (new format)
+                    try:
+                        adjustment_data = json.loads(body)
+                        vertical_adj = adjustment_data.get('vertical_adjustment', 0)
+                        horizontal_adj = adjustment_data.get('horizontal_adjustment', 0)
+                        duration = adjustment_data.get('duration', 45)
+                        intersection = adjustment_data.get('intersection', 'unknown')
                         
-                        # Reset after 60 seconds (simulation time)
+                        print(f"[SEMÁFORO {self.agent.jid}] Ajuste recebido para {intersection}: "
+                              f"Vertical={vertical_adj:+d}s, Horizontal={horizontal_adj:+d}s")
+                        
+                        # Store original values
+                        original_vertical_green = self.agent.green_duration
+                        original_horizontal_green = self.agent.green_duration
+                        
+                        # Apply adjustments (clamp to reasonable values)
+                        # Vertical pair (top-bottom)
+                        new_vertical_green = max(5, min(15, original_vertical_green + vertical_adj))
+                        # Horizontal pair (left-right)
+                        new_horizontal_green = max(5, min(15, original_horizontal_green + horizontal_adj))
+                        
+                        # For now, apply to both pairs (can be enhanced to track separately)
+                        # Use the average or the larger adjustment
+                        avg_adjustment = (vertical_adj + horizontal_adj) / 2
+                        if abs(vertical_adj) > abs(horizontal_adj):
+                            self.agent.green_duration = new_vertical_green
+                        else:
+                            self.agent.green_duration = new_horizontal_green
+                        
+                        print(f"[SEMÁFORO {self.agent.jid}] Duração verde ajustada: "
+                              f"{original_vertical_green}s -> {self.agent.green_duration}s")
+                        
+                        # Reset after duration seconds (simulation time)
                         start_sim_time = self.agent.environment.simulation_time
-                        target_sim_time = start_sim_time + timedelta(seconds=60)
-                        while self.agent.environment.simulation_time < target_sim_time:
-                            await asyncio.sleep(0.1)
-                        self.agent.green_duration = original_green
-                        print(f"[SEMÁFORO {self.agent.jid}] Duração verde resetada para {original_green}s")
+                        target_sim_time = start_sim_time + timedelta(seconds=duration)
+                        
+                        # Wait for duration in background (non-blocking)
+                        async def reset_timing():
+                            while self.agent.environment.simulation_time < target_sim_time:
+                                await asyncio.sleep(0.1)
+                            self.agent.green_duration = original_vertical_green
+                            print(f"[SEMÁFORO {self.agent.jid}] Duração verde resetada para {original_vertical_green}s")
+                        
+                        # Start reset task in background
+                        asyncio.create_task(reset_timing())
+                        
+                    except (json.JSONDecodeError, KeyError):
+                        # Fallback to old format
+                        if "CONGESTION_ALERT" in body:
+                            original_green = self.agent.green_duration
+                            self.agent.green_duration = min(15, self.agent.green_duration + 3)
+                            print(f"[SEMÁFORO {self.agent.jid}] Duração verde: {original_green}s -> {self.agent.green_duration}s")
+                            
+                            # Reset after 60 seconds (simulation time)
+                            start_sim_time = self.agent.environment.simulation_time
+                            target_sim_time = start_sim_time + timedelta(seconds=60)
+                            while self.agent.environment.simulation_time < target_sim_time:
+                                await asyncio.sleep(0.1)
+                            self.agent.green_duration = original_green
+                            print(f"[SEMÁFORO {self.agent.jid}] Duração verde resetada para {original_green}s")
 
                     return True
                 except Exception as e:
@@ -322,6 +367,71 @@ class TrafficLightAgent(Agent):
         template_inform = Template()
         template_inform.set_metadata("protocol", "fipa-inform")
         self.add_behaviour(ReceiveBroadcastBehaviour(), template_inform)
+
+        # ============================================================
+        # FIPA INFORM PROTOCOL - Processar informações de redução de tempo vermelho
+        # ============================================================
+        class ProcessRedTimeReductionBehaviour(CyclicBehaviour):
+            async def run(self):
+                msg = await self.receive(timeout=1)
+                
+                if msg:
+                    protocol = msg.get_metadata("protocol")
+                    performative = msg.get_metadata("performative")
+                    action = msg.get_metadata("action")
+                    
+                    if protocol == "fipa-inform" and performative == "inform" and action == "reduce_red_time":
+                        await self.process_red_time_reduction(msg.body)
+            
+            async def process_red_time_reduction(self, body):
+                """
+                Processa informação para reduzir tempo vermelho de uma direção.
+                Aplica a todas as 3 faixas da direção especificada.
+                """
+                try:
+                    import json
+                    adjustment_data = json.loads(body)
+                    
+                    direction = adjustment_data.get('direction')  # 'vertical' ou 'horizontal'
+                    red_reduction = adjustment_data.get('red_reduction_seconds', 0)
+                    duration = adjustment_data.get('duration', 45)
+                    intersection = adjustment_data.get('intersection', 'unknown')
+                    apply_to_all_lanes = adjustment_data.get('apply_to_all_lanes', True)
+                    
+                    print(f"[SEMÁFORO {self.agent.jid}] Reduzir tempo vermelho {direction} em {red_reduction}s "
+                          f"para {intersection} (todas as 3 faixas: {apply_to_all_lanes})")
+                    
+                    # O tempo vermelho de uma direção = tempo verde + amarelo da direção oposta
+                    # Para reduzir tempo vermelho, reduzimos o tempo verde da direção oposta
+                    original_green = self.agent.green_duration
+                    
+                    # Reduz tempo verde (que reduz o tempo vermelho do par oposto)
+                    new_green = max(5, original_green - red_reduction)
+                    self.agent.green_duration = new_green
+                    print(f"[SEMÁFORO {self.agent.jid}] Tempo verde reduzido: {original_green}s -> {new_green}s "
+                          f"(reduz tempo vermelho {direction} em {red_reduction}s)")
+                    
+                    # Reset after duration seconds (simulation time)
+                    start_sim_time = self.agent.environment.simulation_time
+                    target_sim_time = start_sim_time + timedelta(seconds=duration)
+                    
+                    # Wait for duration in background (non-blocking)
+                    async def reset_timing():
+                        while self.agent.environment.simulation_time < target_sim_time:
+                            await asyncio.sleep(0.1)
+                        self.agent.green_duration = original_green
+                        print(f"[SEMÁFORO {self.agent.jid}] Tempo verde resetado para {original_green}s")
+                    
+                    # Start reset task in background
+                    asyncio.create_task(reset_timing())
+                    
+                except (json.JSONDecodeError, KeyError, Exception) as e:
+                    print(f"[SEMÁFORO {self.agent.jid}] Erro ao processar redução de tempo vermelho: {e}")
+        
+        template_red_reduction = Template()
+        template_red_reduction.set_metadata("protocol", "fipa-inform")
+        template_red_reduction.set_metadata("action", "reduce_red_time")
+        self.add_behaviour(ProcessRedTimeReductionBehaviour(), template_red_reduction)
 
         # ============================================================
         # COMPORTAMENTO PERIÓDICO – CICLO NORMAL COM PARES E AMARELO

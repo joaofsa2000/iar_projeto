@@ -24,30 +24,47 @@ import csv
 from datetime import datetime
 from collections import defaultdict
 
-DATA_DIR = "Data"
+# Get the directory where this script is located
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+# If script is in Data folder, use it; otherwise look for Data folder relative to script
+if os.path.basename(SCRIPT_DIR) == "Data":
+    DATA_DIR = SCRIPT_DIR
+else:
+    # Script might be run from project root, try both locations
+    DATA_DIR = os.path.join(SCRIPT_DIR, "Data")
+    if not os.path.exists(DATA_DIR):
+        # Try current working directory
+        DATA_DIR = os.path.join(os.getcwd(), "Data")
 
 
 def load_latest_session_files():
     """Load the most recent session data files."""
     files = {}
     
-    # Find all session files
-    patterns = [
-        "system_snapshots_*.csv",
-        "congestion_*.csv", 
-        "waiting_times_*.csv",
-        "disruptions_*.csv",
-        "traffic_flow_*.csv",
-        "intersection_metrics_*.csv",
-        "session_summary_*.csv"
-    ]
+    # Ensure DATA_DIR exists
+    if not os.path.exists(DATA_DIR):
+        print(f"[ERRO] Diretório de dados não encontrado: {DATA_DIR}")
+        print(f"[ERRO] Diretório atual: {os.getcwd()}")
+        return files
     
-    for pattern in patterns:
-        matches = glob.glob(os.path.join(DATA_DIR, pattern))
+    # Find all session files
+    # Map pattern to file type key
+    pattern_map = {
+        "system_snapshots_*.csv": "system",
+        "congestion_*.csv": "congestion",
+        "waiting_times_*.csv": "waiting",
+        "disruptions_*.csv": "disruptions",
+        "traffic_flow_*.csv": "traffic",
+        "intersection_metrics_*.csv": "intersection",
+        "session_summary_*.csv": "session"
+    }
+    
+    for pattern, file_type in pattern_map.items():
+        pattern_path = os.path.join(DATA_DIR, pattern)
+        matches = glob.glob(pattern_path)
         if matches:
             # Get the most recent file
             latest = max(matches, key=os.path.getmtime)
-            file_type = pattern.split("_")[0] if "_" in pattern else pattern.replace("*.csv", "")
             files[file_type] = latest
     
     return files
@@ -204,8 +221,15 @@ def analyze_disruptions(filepath):
         print(f"  {dtype}: {count}")
 
 
-def prepare_ml_dataset(output_file="Data/ml_training_data.csv"):
+def prepare_ml_dataset(output_file=None):
     """Prepare a combined dataset for ML model training."""
+    # Use DATA_DIR for output file if not specified
+    if output_file is None:
+        output_file = os.path.join(DATA_DIR, "ml_training_data.csv")
+    elif not os.path.isabs(output_file):
+        # If relative path, make it relative to DATA_DIR
+        output_file = os.path.join(DATA_DIR, output_file)
+    
     files = load_latest_session_files()
     
     print("\n" + "="*60)
@@ -292,7 +316,21 @@ def main():
     
     if not files:
         print("\nNenhum ficheiro de dados encontrado na pasta Data/")
-        print("Execute a simulação primeiro para gerar dados.")
+        print(f"Diretório pesquisado: {DATA_DIR}")
+        print(f"Diretório existe: {os.path.exists(DATA_DIR)}")
+        if os.path.exists(DATA_DIR):
+            # List what files are actually there
+            csv_files = glob.glob(os.path.join(DATA_DIR, "*.csv"))
+            if csv_files:
+                print(f"\nFicheiros CSV encontrados ({len(csv_files)}):")
+                # Show first 10 as examples
+                for f in csv_files[:10]:
+                    print(f"  - {os.path.basename(f)}")
+                if len(csv_files) > 10:
+                    print(f"  ... e mais {len(csv_files) - 10} ficheiros")
+            else:
+                print("Nenhum ficheiro CSV encontrado no diretório.")
+        print("\nExecute a simulação primeiro para gerar dados.")
         return
     
     print(f"\nFicheiros encontrados:")
